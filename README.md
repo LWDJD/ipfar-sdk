@@ -1,2 +1,2 @@
 # ipfar-sdk
-IPFS to Arweave SKD
+IPFS to Arweave SDK
