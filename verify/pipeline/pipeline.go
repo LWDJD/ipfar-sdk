@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/LWDJD/ipfar-sdk/verify/ipfs"
 	"github.com/LWDJD/ipfar-sdk/verify/metadata"
 	"github.com/LWDJD/ipfar-sdk/verify/pow"
 )
@@ -118,6 +119,9 @@ type Pipeline struct {
 	indexVerifier     func() error
 	referenceVerifier func(meta *metadata.Metadata) error
 	integrityVerifier func() error
+
+	// CAR 文件解析器（可选，用于 Index 和 Integrity 验证）
+	carFile string // CAR 文件路径
 }
 
 // NewPipeline 创建新的验证管道
@@ -132,6 +136,20 @@ func NewPipeline(config VerifyConfig) *Pipeline {
 	p.referenceVerifier = defaultReferenceVerifier
 	p.integrityVerifier = defaultIntegrityVerifier
 	return p
+}
+
+// SetCarFile 设置 CAR 文件路径并自动配置 Index/Integrity 验证器
+// 调用此方法后，如果未通过 SetIndexVerifier/SetIntegrityVerifier 注入自定义实现，
+// 则默认验证器将使用该 CAR 文件进行验证。
+func (p *Pipeline) SetCarFile(carPath string) {
+	p.carFile = carPath
+	// 使用基于 CAR 文件的默认实现替换占位实现
+	p.indexVerifier = func() error {
+		return defaultIndexVerifierWithCar(carPath)
+	}
+	p.integrityVerifier = func() error {
+		return defaultIntegrityVerifierWithCar(carPath)
+	}
 }
 
 // NewPipelineWithPreset 从预设创建验证管道
@@ -303,11 +321,47 @@ func defaultPoWVerifier(powStr, powAlg, rootCID, dataTXID string, dataSize int64
 	return pow.Verify(powStr, powAlg, rootCID, dataTXID, dataSize)
 }
 
-// defaultIndexVerifier 默认 Index 验证器
-// 在实际使用中，需要在 CAR 文件下载后调用 CAR 解析器验证
+// defaultIndexVerifier 默认 Index 验证器（无 CAR 文件时跳过）
 func defaultIndexVerifier() error {
-	// 默认实现：占位，实际由外部注入
-	// 当没有注入实际验证器时，返回 nil（跳过）
+	// 占位：无 CAR 文件可用时跳过
+	return nil
+}
+
+// defaultIndexVerifierWithCar 基于 CAR 文件的 Index 验证
+func defaultIndexVerifierWithCar(carPath string) error {
+	if carPath == "" {
+		return nil
+	}
+	parser, err := ipfs.NewCarParserFromFile(carPath)
+	if err != nil {
+		return fmt.Errorf("failed to open CAR file for index verification: %v", err)
+	}
+	defer parser.Close()
+
+	info, err := parser.ParseInfo()
+	if err != nil {
+		return fmt.Errorf("failed to parse CAR file: %v", err)
+	}
+
+	// 仅 CARv2 需要索引
+	if info.Version != 2 {
+		return nil
+	}
+
+	if !info.HasIndex {
+		return ipfs.ErrIndexNotFound
+	}
+
+	// 验证索引内容完整性
+	if err := parser.ValidateIndexContent(); err != nil {
+		return err
+	}
+
+	// 交叉验证索引与数据段
+	if err := parser.ValidateIndexCrossCheck(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -322,10 +376,38 @@ func defaultReferenceVerifier(meta *metadata.Metadata) error {
 	return nil
 }
 
-// defaultIntegrityVerifier 默认数据完整性验证器
+// defaultIntegrityVerifier 默认数据完整性验证器（无 CAR 文件时跳过）
 func defaultIntegrityVerifier() error {
-	// 默认实现：占位，实际由外部注入
-	// 需要重算 CAR 文件哈希并与 CID 比对
+	// 占位：无 CAR 文件可用时跳过
+	return nil
+}
+
+// defaultIntegrityVerifierWithCar 基于 CAR 文件的数据完整性验证
+// 重算所有块的哈希并与 CID 比对
+func defaultIntegrityVerifierWithCar(carPath string) error {
+	if carPath == "" {
+		return nil
+	}
+	parser, err := ipfs.NewCarParserFromFile(carPath)
+	if err != nil {
+		return fmt.Errorf("failed to open CAR file for integrity verification: %v", err)
+	}
+	defer parser.Close()
+
+	var lastErr error
+	blockCount := 0
+	err = parser.IterateBlocks(func(block *ipfs.Block) error {
+		blockCount++
+		if err := parser.ValidateBlockIntegrity(block); err != nil {
+			lastErr = err
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("integrity check failed at block %d: %v", blockCount, lastErr)
+	}
+
 	return nil
 }
 
