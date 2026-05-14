@@ -1,6 +1,7 @@
 package pow
 
 import (
+	"context"
 	"strconv"
 	"testing"
 )
@@ -277,6 +278,69 @@ func TestHasLeadingZeroBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ============================================================
+// ComputePoWParallel 测试
+// ============================================================
+
+// TestComputePoWParallel_Cancellation 验证 context 取消机制
+func TestComputePoWParallel_Cancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := ComputePoWParallel(ctx, "test-cid", "test-tx", 4)
+	if err != ErrPoWCancelled {
+		t.Errorf("expected ErrPoWCancelled, got %v", err)
+	}
+}
+
+// TestComputePoWParallel_NumWorkers1 验证 numWorkers=1 与单线程结果一致
+func TestComputePoWParallel_NumWorkers1(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PoW computation in short mode")
+	}
+
+	rootCID := "test-consistency"
+	dataTXID := "tx-consistency"
+
+	saltSingle, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Fatalf("ComputePoW failed: %v", err)
+	}
+
+	saltParallel, err := ComputePoWParallel(context.Background(), rootCID, dataTXID, 1)
+	if err != nil {
+		t.Fatalf("ComputePoWParallel(workers=1) failed: %v", err)
+	}
+
+	if saltSingle != saltParallel {
+		t.Errorf("mismatch: single=%s, parallel(1)=%s", saltSingle, saltParallel)
+	}
+
+	t.Logf("Both single and parallel(1) found salt=%s", saltSingle)
+}
+
+// TestComputePoWParallel_Correctness 验证并行搜索结果满足难度要求
+func TestComputePoWParallel_Correctness(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PoW computation in short mode")
+	}
+
+	rootCID := "parallel-correctness"
+	dataTXID := "tx-correctness"
+
+	salt, err := ComputePoWParallel(context.Background(), rootCID, dataTXID, 3)
+	if err != nil {
+		t.Fatalf("ComputePoWParallel failed: %v", err)
+	}
+
+	err = Verify(salt, Algorithm, rootCID, dataTXID, 1024)
+	if err != nil {
+		t.Errorf("salt %s does not satisfy PoW difficulty: %v", salt, err)
+	}
+
+	t.Logf("Parallel(3) found salt=%s, verified OK", salt)
 }
 
 // ============================================================
