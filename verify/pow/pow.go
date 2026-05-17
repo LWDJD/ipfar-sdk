@@ -4,10 +4,13 @@
 package pow
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -29,16 +32,33 @@ const (
 
 	// PoWThreshold 100 MiB 阈值：大于等于此大小的文件免 PoW
 	PoWThreshold = 100 * 1024 * 1024
+
+	// maxSaltSafety 安全上限，防止无限循环
+	maxSaltSafety = 10_000_000
 )
 
 // 错误定义
 var (
-	ErrMissingPoW         = errors.New("PoW is required for files smaller than 100 MiB")
-	ErrInvalidPoWFormat   = errors.New("invalid PoW format: must be a decimal string representing a 64-bit unsigned integer")
+	ErrMissingPoW            = errors.New("PoW is required for files smaller than 100 MiB")
+	ErrInvalidPoWFormat      = errors.New("invalid PoW format: must be a decimal string representing a 64-bit unsigned integer")
 	ErrPoWVerificationFailed = errors.New("PoW verification failed: insufficient leading zeros")
-	ErrAlgorithmMismatch   = errors.New("PoW algorithm mismatch")
-	ErrMissingAlgorithm    = errors.New("PoW algorithm identifier is required")
+	ErrAlgorithmMismatch     = errors.New("PoW algorithm mismatch")
+	ErrMissingAlgorithm      = errors.New("PoW algorithm identifier is required")
+	ErrPoWCancelled          = errors.New("PoW computation cancelled")
 )
+
+// defaultWorkers returns the recommended number of parallel PoW workers.
+// Caps at 4 to stay within reasonable memory limits.
+func defaultWorkers() int {
+	n := runtime.NumCPU()
+	if n > 4 {
+		n = 4
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
 
 // NeedsPoW 判断给定大小的文件是否需要 PoW 验证
 // 规则：< 100 MiB 需要 PoW，≥ 100 MiB 免 PoW
@@ -121,10 +141,12 @@ func hasLeadingZeroBytes(data []byte, n int) bool {
 	return true
 }
 
-// ComputePoW 计算满足难度要求的 PoW salt（用于生成/测试）
+// ComputePoW 计算满足难度要求的 PoW salt（单线程兼容包装）
 //
 // 警告：此函数执行 PoW 计算，可能消耗大量 CPU 和内存资源。
 // 平均需要 ~65,536 次 Argon2id 计算（20MB/次）。
+//
+// 内部调用 ComputePoWParallel，使用默认 worker 数量。
 // 仅用于离线生成测试向量，生产环境不应调用此函数。
 //
 // 参数:
@@ -133,22 +155,87 @@ func hasLeadingZeroBytes(data []byte, n int) bool {
 //
 // 返回: 满足难度要求的 salt 值（十进制字符串）
 func ComputePoW(rootCID, dataTXID string) (string, error) {
+	return ComputePoWParallel(context.Background(), rootCID, dataTXID, 0)
+}
+
+// ComputePoWParallel 使用多 goroutine 并行搜索不同 salt 范围，计算满足难度要求的 PoW salt。
+//
+// 规范参考: ipfar-specs/V1/项目规划.md §2.1 — 搜索并行度不限制。
+//
+// 每个 worker 搜索互不重叠的 salt 子空间（stride = numWorkers），
+// 任一 worker 找到合法 salt 后立即通过 context 取消其余 worker。
+//
+// 参数:
+//   - ctx: 上下文，用于取消正在进行的搜索
+//   - rootCID: 根 CID
+//   - dataTXID: 数据交易 ID
+//   - numWorkers: 并行 worker 数量。传入 0 或负数则使用默认值 min(NumCPU, 4)
+//
+// 返回满足难度要求的 salt 值（十进制字符串）。
+func ComputePoWParallel(ctx context.Context, rootCID, dataTXID string, numWorkers int) (string, error) {
+	if numWorkers <= 0 {
+		numWorkers = defaultWorkers()
+	}
+
 	password := []byte(rootCID + dataTXID)
 
-	var salt uint64
-	for salt = 0; ; salt++ {
-		saltBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(saltBytes, salt)
+	// Create a cancellable context so the first worker to find a solution
+	// can signal all others to stop.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-		hash := argon2.IDKey(password, saltBytes, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+	resultCh := make(chan string, 1)
+	var wg sync.WaitGroup
 
-		if hasLeadingZeroBytes(hash, MinLeadingZeroBytes) {
-			return strconv.FormatUint(salt, 10), nil
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(startSalt uint64) {
+			defer wg.Done()
+			salt := startSalt
+			for {
+				// Check cancellation before each hash computation.
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				saltBytes := make([]byte, 8)
+				binary.LittleEndian.PutUint64(saltBytes, salt)
+				hash := argon2.IDKey(password, saltBytes, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+
+				if hasLeadingZeroBytes(hash, MinLeadingZeroBytes) {
+					select {
+					case resultCh <- strconv.FormatUint(salt, 10):
+					case <-ctx.Done():
+					default:
+					}
+					return
+				}
+
+				salt += uint64(numWorkers)
+
+				if salt > maxSaltSafety {
+					return
+				}
+			}
+		}(uint64(i))
+	}
+
+	// Close resultCh when all workers have exited.
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	// Wait for the first result, cancellation, or all workers exhausted.
+	select {
+	case result, ok := <-resultCh:
+		if ok && result != "" {
+			return result, nil
 		}
-
-		// 安全上限：防止无限循环（实际 PoW 应该在该上限之前找到）
-		if salt > 10_000_000 {
-			return "", errors.New("PoW computation exceeded safety limit")
-		}
+		return "", errors.New("PoW computation exceeded safety limit")
+	case <-ctx.Done():
+		return "", ErrPoWCancelled
 	}
 }
