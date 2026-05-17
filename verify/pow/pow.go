@@ -20,7 +20,7 @@ const (
 	// Algorithm 算法标识符
 	Algorithm = "argon2id-light-v1"
 
-	// Argon2id 参数
+	// Argon2id 参数（全档位统一）
 	argon2Memory  = 20 * 1024 // 20 MB（单位：KB）
 	argon2Time    = 1         // 迭代次数
 	argon2Threads = 1         // 并行度
@@ -142,6 +142,9 @@ func hasLeadingZeroBytes(data []byte, n int) bool {
 }
 
 // ComputePoW 计算满足难度要求的 PoW salt（单线程兼容包装）
+//
+// 警告：此函数执行 PoW 计算，可能消耗大量 CPU 和内存资源。
+// 平均需要 ~65,536 次 Argon2id 计算（20MB/次）。
 //
 // 内部调用 ComputePoWParallel，使用默认 worker 数量。
 // 仅用于离线生成测试向量，生产环境不应调用此函数。
