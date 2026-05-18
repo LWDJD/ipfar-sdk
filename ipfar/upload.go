@@ -31,6 +31,9 @@ type UploadOptions struct {
 //
 // Returns UploadResult with txids.
 func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wallet, filePath string, opts *UploadOptions) (*UploadResult, error) {
+	if arw == nil {
+		return nil, fmt.Errorf("gateway client is nil")
+	}
 	if opts == nil {
 		opts = &UploadOptions{}
 	}

@@ -336,3 +336,31 @@ func (gc *GatewayClient) runGraphQLQuery(ctx context.Context, query string) ([]s
 	}
 	return ids, nil
 }
+
+// DownloadTransactionData downloads the full raw data of a transaction
+// using GET /{txID}.  Returns the raw bytes of the transaction data.
+func (gc *GatewayClient) DownloadTransactionData(ctx context.Context, txID string) ([]byte, error) {
+	url := gc.GatewayURL + "/" + txID
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := gc.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download tx %s: %w", txID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned %d for tx %s: %s", resp.StatusCode, txID, string(body))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body for tx %s: %w", txID, err)
+	}
+
+	return data, nil
+}

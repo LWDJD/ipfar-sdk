@@ -13,15 +13,9 @@ import (
 	"github.com/multiformats/go-varint"
 )
 
-// carv2Pragma is the standard CBOR-encoded CAR v2 pragma: {"version": 2}
-// Spec: https://ipld.io/specs/transport/car/carv2/
-var carv2Pragma = []byte{
-	0x0a,                                     // uint(10) — outer CBOR map length
-	0xa1,                                     // map(1)
-	0x67,                                     // string(7)
-	0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, // "version"
-	0x02,                                     // uint(2)
-}
+// carv2Pragma is the standard CAR v2 magic bytes "car\x02".
+// Spec: https://ipld.io/specs/transport/car/carv2/#format
+var carv2Pragma = []byte{0x63, 0x61, 0x72, 0x02}
 
 // BuildCAR creates a CAR v2 file from the given data and root CID.
 // The data is wrapped in a raw block and the provided rootCID is set
@@ -63,13 +57,14 @@ func BuildCAR(ctx context.Context, data []byte, rootCID string) ([]byte, error) 
 
 	// Compute offsets.
 	pragmaSize := int64(len(carv2Pragma))
-	v2HeaderSize := int64(40)
+	v2HeaderSize := int64(48)
 	v1HeaderSize := int64(len(v1Header))
 	dataOffset := pragmaSize + v2HeaderSize
 	dataSize := v1HeaderSize + int64(len(blockBytes))
 	indexOffset := dataOffset + dataSize
+	indexSize := int64(len(index))
 
-	v2Header := buildV2Header(uint64(dataOffset), uint64(dataSize), uint64(indexOffset))
+	v2Header := buildV2HeaderWithIndexSize(uint64(dataOffset), uint64(dataSize), uint64(indexOffset), uint64(indexSize))
 
 	// Assemble.
 	var buf bytes.Buffer
@@ -119,17 +114,26 @@ func buildV1Header(roots []cid.Cid) []byte {
 	return buf.Bytes()
 }
 
-// buildV2Header builds the standard CAR v2 header (40 bytes):
+// buildV2Header builds the standard CAR v2 header (48 bytes):
 //
 //	Characteristics [16]byte  — all zeros
-//	DataOffset      uint64 LE
-//	DataSize        uint64 LE
-//	IndexOffset     uint64 LE
+//	DataOffset      uint64 LE — offset of inner CARv1 payload
+//	DataSize        uint64 LE — total size of inner CARv1 payload
+//	IndexOffset     uint64 LE — offset of CARv2 index
+//	IndexSize       uint64 LE — size of CARv2 index
 func buildV2Header(dataOffset, dataSize, indexOffset uint64) []byte {
-	hdr := make([]byte, 40)
+	hdr := make([]byte, 48)
 	binary.LittleEndian.PutUint64(hdr[16:24], dataOffset)
 	binary.LittleEndian.PutUint64(hdr[24:32], dataSize)
 	binary.LittleEndian.PutUint64(hdr[32:40], indexOffset)
+	binary.LittleEndian.PutUint64(hdr[40:48], uint64(0)) // index_size updated below
+	return hdr
+}
+
+// buildV2HeaderWithIndexSize builds a CAR v2 header with a known index size.
+func buildV2HeaderWithIndexSize(dataOffset, dataSize, indexOffset, indexSize uint64) []byte {
+	hdr := buildV2Header(dataOffset, dataSize, indexOffset)
+	binary.LittleEndian.PutUint64(hdr[40:48], indexSize)
 	return hdr
 }
 

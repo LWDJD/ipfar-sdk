@@ -115,13 +115,15 @@ func chunkData(data []byte) []merkleChunk {
 		rest = rest[chunkSize:]
 	}
 
-	// Last chunk (may be empty).
-	hash := sha256.Sum256(rest)
-	chunks = append(chunks, merkleChunk{
-		DataHash:     hash[:],
-		MinByteRange: cursor,
-		MaxByteRange: cursor + len(rest),
-	})
+	// Only emit a trailing chunk if there is remaining data.
+	if len(rest) > 0 {
+		hash := sha256.Sum256(rest)
+		chunks = append(chunks, merkleChunk{
+			DataHash:     hash[:],
+			MinByteRange: cursor,
+			MaxByteRange: cursor + len(rest),
+		})
+	}
 	return chunks
 }
 

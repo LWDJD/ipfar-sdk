@@ -29,12 +29,13 @@ func TestBuildCarV2_Basic(t *testing.T) {
 		t.Error("Root CID is undefined")
 	}
 
-	// Verify the CAR starts with the standard CBOR pragma
-	if len(carBytes) < len(carv2Pragma) {
+	// Verify the CAR starts with the standard CARv2 pragma "car\\x02"
+	stdPragma := []byte{0x63, 0x61, 0x72, 0x02}
+	if len(carBytes) < len(stdPragma) {
 		t.Fatal("CAR too short for pragma check")
 	}
-	if !bytes.Equal(carBytes[:len(carv2Pragma)], carv2Pragma) {
-		t.Errorf("CAR does not start with standard CBOR pragma")
+	if !bytes.Equal(carBytes[:len(stdPragma)], stdPragma) {
+		t.Errorf("CAR does not start with standard CARv2 pragma")
 	}
 
 	// Verify we can extract the original data back

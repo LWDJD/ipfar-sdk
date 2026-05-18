@@ -26,6 +26,9 @@ var DefaultFallbackGateways = []string{
 // Multi-gateway verification is attempted using the provided gateways list
 // (falling back to DefaultFallbackGateways if empty).
 func FindExistingCAR(ctx context.Context, arw *arweave.GatewayClient, rootCID string, gateways []string) (string, int, error) {
+	if arw == nil {
+		return "", 0, fmt.Errorf("gateway client is nil")
+	}
 	candidates, err := arw.QueryExistingCARs(ctx, rootCID, 8)
 	if err != nil {
 		return "", 0, fmt.Errorf("dedup query failed: %w", err)
@@ -50,6 +53,9 @@ func FindExistingCAR(ctx context.Context, arw *arweave.GatewayClient, rootCID st
 // matching the given rootCID and dataTXID.  Returns the txid if found and
 // verified, or an empty string if no valid match exists.
 func FindExistingMeta(ctx context.Context, arw *arweave.GatewayClient, rootCID, dataTXID string, gateways []string) (string, error) {
+	if arw == nil {
+		return "", fmt.Errorf("gateway client is nil")
+	}
 	candidates, err := arw.QueryExistingMetas(ctx, rootCID, dataTXID, 8)
 	if err != nil {
 		return "", fmt.Errorf("metadata dedup query failed: %w", err)

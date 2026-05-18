@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
+	sdkcar "github.com/LWDJD/ipfar-sdk/verify/ipfs"
 	sdkmeta "github.com/LWDJD/ipfar-sdk/verify/metadata"
 	"github.com/ipfs/go-cid"
 )
@@ -74,6 +75,9 @@ func Download(ctx context.Context, arw *arweave.GatewayClient, rootCID string) (
 
 // DownloadRaw downloads raw data by Arweave transaction ID.
 func DownloadRaw(ctx context.Context, arw *arweave.GatewayClient, txID string) ([]byte, error) {
+	if arw == nil {
+		return nil, fmt.Errorf("gateway client is nil")
+	}
 	data, err := arw.DownloadTransactionData(ctx, txID)
 	if err != nil {
 		return nil, fmt.Errorf("download raw %s: %w", txID, err)
@@ -108,68 +112,51 @@ func tryParseMetadata(rawData []byte) (*sdkmeta.Metadata, error) {
 // For single-block CAR files (the common case), this finds and returns the
 // sole data block.
 func extractDataFromCAR(carBytes []byte) ([]byte, error) {
-	// Use the SDK's CAR parser
-	// For now, a simple heuristic: find the single data block after the header.
-	// The CAR structure for a single file is:
-	//   CARv2 pragma + v2 header + v1 header + [varint(len) + CID + data] + index
-
-	// Simple extraction: find the data section by skipping known headers.
-	// This is a simplified approach; production code should use verify/ipfs.CarParser.
-
-	// Skip CAR v2 pragma (11 bytes) + v2 header (40 bytes)
-	const minOffset = 51
-	if len(carBytes) < minOffset+20 {
-		return nil, fmt.Errorf("CAR too short")
-	}
-
-	// Read v1 header at offset 51
-	pos := minOffset
-
-	// Read varint version (should be 1)
-	version, n := readVarint(carBytes[pos:])
-	if n <= 0 || version != 1 {
-		return nil, fmt.Errorf("invalid CAR v1 header: unexpected version %d", version)
-	}
-	pos += n
-
-	// Read root count
-	rootCount, n := readVarint(carBytes[pos:])
-	if n <= 0 {
-		return nil, fmt.Errorf("invalid CAR v1 header: cannot read root count")
-	}
-	pos += n
-
-	// Skip root CIDs
-	for i := uint64(0); i < rootCount; i++ {
-		cidLen, n := readVarint(carBytes[pos:])
-		if n <= 0 || pos+n+int(cidLen) > len(carBytes) {
-			return nil, fmt.Errorf("invalid CAR v1 header: cannot read root CID")
-		}
-		pos += n + int(cidLen)
-	}
-
-	// Now at the first data block: varint(sectionLen) + CID + data
-	sectionLen, n := readVarint(carBytes[pos:])
-	if n <= 0 || sectionLen == 0 {
-		return nil, fmt.Errorf("no data blocks in CAR")
-	}
-	pos += n
-
-	// Decode CID from bytes to determine its length
-	_, blockCID, err := cid.CidFromBytes(carBytes[pos:])
+	// Use the SDK's CAR parser from verify/ipfs
+	reader := &bytesReaderAt{data: carBytes}
+	parser, err := sdkcar.NewCarParserFromReader(reader, int64(len(carBytes)))
 	if err != nil {
-		return nil, fmt.Errorf("invalid CID in CAR block: %w", err)
+		return nil, fmt.Errorf("failed to parse CAR header: %w", err)
+	}
+	defer parser.Close()
+
+	// Use the data offset from CarInfo to read the raw data directly
+	// For a single-block CAR, the data starts at DataOffset and we need to
+	// skip the varint section length prefix and CID to get the actual content
+	info, err := parser.ParseInfo()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CAR info: %w", err)
+	}
+
+	// Read the data section, skipping varint(length) + CID
+	dataStart := int(info.DataOffset)
+	if dataStart >= len(carBytes) {
+		return nil, fmt.Errorf("data offset beyond file")
+	}
+
+	// Read varint section length
+	sectionLen, n := readVarint(carBytes[dataStart:])
+	if n <= 0 {
+		return nil, fmt.Errorf("invalid section length at data offset")
+	}
+
+	// Parse the CID to determine its length
+	_, blockCID, err := cid.CidFromBytes(carBytes[dataStart+n:])
+	if err != nil {
+		return nil, fmt.Errorf("invalid CID: %w", err)
 	}
 	cidLen := blockCID.ByteLen()
-	pos += cidLen
 
+	// The data follows the CID
+	dataOffset := dataStart + n + cidLen
 	dataLen := int(sectionLen) - cidLen
-	if dataLen < 0 || pos+dataLen > len(carBytes) {
-		return nil, fmt.Errorf("CAR data block extends beyond file")
+	if dataLen < 0 || dataOffset+dataLen > len(carBytes) {
+		return nil, fmt.Errorf("invalid data block")
 	}
 
-	return carBytes[pos : pos+dataLen], nil
+	return carBytes[dataOffset : dataOffset+dataLen], nil
 }
+
 
 // readVarint reads a varint from data, returns (value, bytesRead).
 func readVarint(data []byte) (uint64, int) {
@@ -182,13 +169,11 @@ func readVarint(data []byte) (uint64, int) {
 		if i >= 10 {
 			return 0, 0
 		}
+		if b < 0x80 {
+			return x | uint64(b)<<s, i + 1
+		}
 		x |= uint64(b&0x7f) << s
 		s += 7
-		if b < 0x80 {
-			return x, i + 1
-		}
 	}
 	return 0, 0
 }
-
-// readVarint reads a varint from data, returns (value, bytesRead).
