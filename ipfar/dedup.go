@@ -102,15 +102,17 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 		}
 
 		info, err := parser.ParseInfo()
-		parser.Close()
 		if err != nil {
+			parser.Close()
 			continue
 		}
 
 		if info.Version != 2 {
+			parser.Close()
 			continue
 		}
 		if !info.HasIndex {
+			parser.Close()
 			continue
 		}
 
@@ -122,15 +124,24 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 			}
 		}
 		if !found {
+			parser.Close()
 			continue
 		}
 
 		// Get block height
 		status, err := gw.GetTransactionStatus(ctx, txID)
 		if err != nil || status == nil {
+			parser.Close()
 			continue
 		}
 
+		// Validate index integrity
+		if err := parser.ValidateIndex(); err != nil {
+			parser.Close()
+			continue
+		}
+
+		parser.Close()
 		return true, status.BlockHeight
 	}
 
@@ -231,9 +242,41 @@ func (r *remoteCarReader) ReadAt(p []byte, off int64) (n int, err error) {
 	return n, nil
 }
 
+// ── Exported verification helpers ─────────────────────────────────────
+
+// VerifyRemoteCAR downloads key portions of a remote CAR and validates it
+// against the expected root CID.  Tries the primary gateway plus any extra
+// gateways provided (falling back to DefaultFallbackGateways).
+//
+// Returns (true, nil) on success or (false, error) when all gateways fail.
+func VerifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, expectedRootCID string, gateways []string) (bool, error) {
+	gwURLs := collectGatewayURLs(primary, gateways)
+	verified, _ := verifyRemoteCAR(ctx, primary, txID, expectedRootCID, gwURLs)
+	if verified {
+		return true, nil
+	}
+	return false, fmt.Errorf("remote CAR verification failed for tx %s", txID)
+}
+
+// VerifyRemoteMeta downloads and validates remote metadata against the
+// expected rootCID and dataTXID.  Tries the primary gateway plus any extra
+// gateways provided (falling back to DefaultFallbackGateways).
+//
+// Returns (true, nil) on success or (false, error) when all gateways fail.
+func VerifyRemoteMeta(ctx context.Context, primary *arweave.GatewayClient, txID, expectedRootCID, expectedDataTXID string, gateways []string) (bool, error) {
+	gwURLs := collectGatewayURLs(primary, gateways)
+	if verifyRemoteMeta(ctx, primary, txID, expectedRootCID, expectedDataTXID, gwURLs) {
+		return true, nil
+	}
+	return false, fmt.Errorf("remote metadata verification failed for tx %s", txID)
+}
+
 // ── Gateway URL collection ─────────────────────────────────────────────
 
 // collectGatewayURLs returns a deduplicated list of gateway URLs.
+//
+// When extra is nil, DefaultFallbackGateways are appended after the primary
+// URL.  Pass an empty (but non-nil) slice to use only the primary gateway.
 func collectGatewayURLs(primary *arweave.GatewayClient, extra []string) []string {
 	seen := make(map[string]bool)
 	var urls []string
@@ -242,7 +285,12 @@ func collectGatewayURLs(primary *arweave.GatewayClient, extra []string) []string
 	seen[primaryURL] = true
 	urls = append(urls, primaryURL)
 
-	all := append(extra, DefaultFallbackGateways...)
+	var all []string
+	if extra == nil {
+		all = DefaultFallbackGateways
+	} else {
+		all = extra
+	}
 	for _, u := range all {
 		u = strings.TrimRight(u, "/")
 		if !seen[u] {

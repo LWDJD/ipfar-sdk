@@ -18,6 +18,20 @@ import (
 // CARv2 魔数 "car\x02"
 var carv2Pragma = []byte{0x63, 0x61, 0x72, 0x02}
 
+// carv2CBORPragma is the standard CBOR-encoded CAR v2 pragma:
+//
+//	0x0a                       — CBOR uint(10), outer map length
+//	0xa1                       — CBOR map(1)
+//	0x67 76 65 72 73 69 6f 6e  — CBOR string(7) "version"
+//	0x02                       — CBOR uint(2)
+var carv2CBORPragma = []byte{
+	0x0a,                                     // uint(10)
+	0xa1,                                     // map(1)
+	0x67,                                     // string(7)
+	0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, // "version"
+	0x02,                                     // uint(2)
+}
+
 // CARv1 头部结构
 type CarV1Header struct {
 	Version uint64
@@ -62,9 +76,11 @@ type BlockMetadata struct {
 
 // CarParser CAR 文件解析器
 type CarParser struct {
-	reader   io.ReaderAt // 文件读取接口
-	fileSize int64       // 文件大小
-	info     *CarInfo    // 解析后的元信息
+	reader       io.ReaderAt // 文件读取接口
+	fileSize     int64       // 文件大小
+	info         *CarInfo    // 解析后的元信息
+	pragmaSize   int64       // CAR v2 pragma size in bytes (4 for legacy, 11 for CBOR)
+	v2HeaderSize int64       // CAR v2 header size in bytes (48 for legacy, 40 for CBOR)
 }
 
 // 错误定义
@@ -185,7 +201,17 @@ func (p *CarParser) readVersion() (uint64, error) {
 		return 0, ErrInvalidCarFile
 	}
 
+	// Legacy "car\x02" pragma (4 bytes)
 	if bytes.Equal(buf[:4], carv2Pragma) {
+		p.pragmaSize = 4
+		p.v2HeaderSize = 48
+		return 2, nil
+	}
+
+	// Standard CBOR-encoded CAR v2 pragma: 0x0a + {"version": 2} (11 bytes)
+	if n >= len(carv2CBORPragma) && bytes.Equal(buf[:len(carv2CBORPragma)], carv2CBORPragma) {
+		p.pragmaSize = int64(len(carv2CBORPragma))
+		p.v2HeaderSize = 40
 		return 2, nil
 	}
 
@@ -292,12 +318,21 @@ func (p *CarParser) readCarV1HeaderAt(offset int64) (uint64, []cid.Cid, error) {
 
 // readCarV2Header 读取 CARv2 头部
 func (p *CarParser) readCarV2Header() (*CarV2Header, error) {
-	buf := make([]byte, 48)
-	n, err := p.reader.ReadAt(buf, 4)
+	pragmaSize := p.pragmaSize
+	if pragmaSize == 0 {
+		pragmaSize = 4 // default to legacy
+	}
+	v2HeaderSize := p.v2HeaderSize
+	if v2HeaderSize == 0 {
+		v2HeaderSize = 48 // default to legacy
+	}
+
+	buf := make([]byte, v2HeaderSize)
+	n, err := p.reader.ReadAt(buf, pragmaSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CARv2 header: %v", err)
 	}
-	if n < 48 {
+	if n < int(v2HeaderSize) {
 		return nil, ErrCorruptedHeader
 	}
 
@@ -306,7 +341,14 @@ func (p *CarParser) readCarV2Header() (*CarV2Header, error) {
 	header.DataOffset = binary.LittleEndian.Uint64(buf[16:24])
 	header.DataSize = binary.LittleEndian.Uint64(buf[24:32])
 	header.IndexOffset = binary.LittleEndian.Uint64(buf[32:40])
-	header.IndexSize = binary.LittleEndian.Uint64(buf[40:48])
+	if v2HeaderSize >= 48 {
+		header.IndexSize = binary.LittleEndian.Uint64(buf[40:48])
+	} else {
+		// CBOR format: no IndexSize in header; compute from file size
+		if header.IndexOffset > 0 && p.fileSize > int64(header.IndexOffset) {
+			header.IndexSize = uint64(p.fileSize) - header.IndexOffset
+		}
+	}
 
 	if header.DataOffset == 0 {
 		return nil, fmt.Errorf("%w: invalid data offset", ErrCorruptedHeader)
