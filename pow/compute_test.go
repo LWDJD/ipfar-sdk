@@ -51,7 +51,7 @@ func TestComputePoW_ValidSalt(t *testing.T) {
 
 	ctx := context.Background()
 	var lastProgress ProgressInfo
-	salt, err := ComputePoW(ctx, rootCID, dataTXID, 1, func(info ProgressInfo) {
+	salt, err := ComputePoW(ctx, rootCID, dataTXID, 10, func(info ProgressInfo) {
 		lastProgress = info
 	})
 	if err != nil {
@@ -86,8 +86,11 @@ func TestComputePoW_ProgressCallback(t *testing.T) {
 	rootCID := "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
 	dataTXID := "test-progress-callback"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
 	var maxAttempts uint64
-	salt, err := ComputePoW(context.Background(), rootCID, dataTXID, 2, func(info ProgressInfo) {
+	salt, err := ComputePoW(ctx, rootCID, dataTXID, 10, func(info ProgressInfo) {
 		if info.Attempts > maxAttempts {
 			maxAttempts = info.Attempts
 		}

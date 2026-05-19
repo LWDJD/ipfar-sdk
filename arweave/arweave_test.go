@@ -807,3 +807,246 @@ func TestSignChunkedTx(t *testing.T) {
 
 	t.Logf("Chunked TX ID: %s", ct.ID)
 }
+
+// =============================================================================
+// SetHTTPClient / HTTPClient tests
+// =============================================================================
+
+func TestSetHTTPClient_UnitTest(t *testing.T) {
+	client := NewGatewayClient("https://example.com")
+	customHTTP := &http.Client{Timeout: 5 * time.Second}
+	client.SetHTTPClient(customHTTP)
+
+	if client.HTTPClient() != customHTTP {
+		t.Fatal("HTTPClient() should return the custom client set via SetHTTPClient")
+	}
+}
+
+// =============================================================================
+// DownloadTransactionData test
+// =============================================================================
+
+func TestDownloadTransactionData_UnitTest(t *testing.T) {
+	expectedData := []byte("hello transaction data!")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/test-tx-abc" {
+			w.WriteHeader(http.StatusOK)
+			w.Write(expectedData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+	data, err := client.DownloadTransactionData(context.Background(), "test-tx-abc")
+	if err != nil {
+		t.Fatalf("DownloadTransactionData failed: %v", err)
+	}
+	if string(data) != string(expectedData) {
+		t.Errorf("expected %q, got %q", expectedData, data)
+	}
+}
+
+func TestDownloadTransactionData_NotFound_UnitTest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+	_, err := client.DownloadTransactionData(context.Background(), "nonexistent-tx")
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+	t.Logf("Got expected error: %v", err)
+}
+
+// =============================================================================
+// SetTags / SetTarget / SetLastTx builder methods
+// =============================================================================
+
+func TestSetTags_UnitTest(t *testing.T) {
+	tb := NewTransactionBuilder("owner-test")
+	tb.AddTag("OldTag", "OldValue")
+	tb.SetTags([]Tag{{Name: "NewTag", Value: "NewValue"}})
+
+	tx := tb.Build()
+	if len(tx.Tags) != 1 {
+		t.Fatalf("SetTags should replace all tags, got %d tags", len(tx.Tags))
+	}
+	if tx.Tags[0].Name != "NewTag" || tx.Tags[0].Value != "NewValue" {
+		t.Errorf("unexpected tag after SetTags: %+v", tx.Tags[0])
+	}
+}
+
+func TestSetTarget_UnitTest(t *testing.T) {
+	tb := NewTransactionBuilder("owner-test")
+	tb.SetTarget("target-address-123")
+	tx := tb.Build()
+	if tx.Target != "target-address-123" {
+		t.Errorf("expected target 'target-address-123', got %q", tx.Target)
+	}
+}
+
+func TestSetLastTx_UnitTest(t *testing.T) {
+	tb := NewTransactionBuilder("owner-test")
+	tb.SetLastTx("last-tx-anchor-456")
+	tx := tb.Build()
+	if tx.LastTx != "last-tx-anchor-456" {
+		t.Errorf("expected last_tx 'last-tx-anchor-456', got %q", tx.LastTx)
+	}
+}
+
+// =============================================================================
+// Helper function tests: base64Encode, base64Decode, sha384Hash,
+// encodeAVROLong, longTo32BytesBE, bufferToInt
+// =============================================================================
+
+func TestBase64EncodeDecode_UnitTest(t *testing.T) {
+	t.Run("base64Encode", func(t *testing.T) {
+		encoded := base64Encode([]byte("hello world"))
+		if encoded == "" {
+			t.Fatal("base64Encode returned empty string")
+		}
+		// Should be RawURLEncoding (no padding)
+		if encoded[len(encoded)-1] == '=' {
+			t.Error("base64Encode should use RawURLEncoding (no padding)")
+		}
+		t.Logf("base64Encode('hello world') = %s", encoded)
+	})
+
+	t.Run("base64Decode", func(t *testing.T) {
+		decoded, err := base64Decode("aGVsbG8gd29ybGQ")
+		if err != nil {
+			t.Fatalf("base64Decode failed: %v", err)
+		}
+		if string(decoded) != "hello world" {
+			t.Errorf("expected 'hello world', got %q", decoded)
+		}
+	})
+
+	t.Run("base64RoundTrip", func(t *testing.T) {
+		original := []byte("test data 12345 !@#$%")
+		encoded := base64Encode(original)
+		decoded, err := base64Decode(encoded)
+		if err != nil {
+			t.Fatalf("roundtrip decode failed: %v", err)
+		}
+		if string(decoded) != string(original) {
+			t.Errorf("roundtrip mismatch: got %q, want %q", decoded, original)
+		}
+	})
+
+	t.Run("base64DecodeInvalid", func(t *testing.T) {
+		_, err := base64Decode("!!!invalid!!!")
+		if err == nil {
+			t.Fatal("expected error for invalid base64")
+		}
+	})
+}
+
+func TestSha384Hash_UnitTest(t *testing.T) {
+	hash := sha384Hash([]byte("test data"))
+	if len(hash) != 48 {
+		t.Errorf("expected 48-byte SHA-384 hash, got %d", len(hash))
+	}
+
+	// Determinism
+	hash2 := sha384Hash([]byte("test data"))
+	if string(hash) != string(hash2) {
+		t.Fatal("sha384Hash not deterministic")
+	}
+
+	// Different input → different output
+	hash3 := sha384Hash([]byte("other data"))
+	if string(hash) == string(hash3) {
+		t.Fatal("different inputs should produce different hashes")
+	}
+
+	t.Logf("SHA-384: %x", hash)
+}
+
+func TestEncodeAVROLong_UnitTest(t *testing.T) {
+	t.Run("Positive", func(t *testing.T) {
+		encoded := encodeAVROLong(42)
+		if len(encoded) == 0 {
+			t.Fatal("encodeAVROLong returned empty")
+		}
+		t.Logf("encodeAVROLong(42) = %x", encoded)
+	})
+
+	t.Run("Negative", func(t *testing.T) {
+		encoded := encodeAVROLong(-1)
+		if len(encoded) == 0 {
+			t.Fatal("encodeAVROLong(-1) returned empty")
+		}
+		t.Logf("encodeAVROLong(-1) = %x", encoded)
+	})
+
+	t.Run("Zero", func(t *testing.T) {
+		encoded := encodeAVROLong(0)
+		// Zero encodes as a single 0x00 byte
+		if len(encoded) != 1 || encoded[0] != 0 {
+			t.Errorf("encodeAVROLong(0) should be [0x00], got %x", encoded)
+		}
+	})
+
+	t.Run("LargeValue", func(t *testing.T) {
+		encoded := encodeAVROLong(1 << 20)
+		if len(encoded) == 0 {
+			t.Fatal("encodeAVROLong for large value returned empty")
+		}
+		t.Logf("encodeAVROLong(1<<20) = %x (len=%d)", encoded, len(encoded))
+	})
+}
+
+func TestLongTo32BytesBE_UnitTest(t *testing.T) {
+	buf := longTo32BytesBE(42)
+	if len(buf) != 32 {
+		t.Fatalf("expected 32-byte buffer, got %d", len(buf))
+	}
+
+	// 42 should be stored in big-endian at the end of the buffer
+	if buf[31] != 42 {
+		t.Errorf("expected last byte to be 42, got %d", buf[31])
+	}
+
+	// All leading bytes should be 0
+	for i := 0; i < 31; i++ {
+		if buf[i] != 0 {
+			t.Errorf("byte %d should be 0, got %d", i, buf[i])
+		}
+	}
+
+	t.Logf("longTo32BytesBE(42) = %x", buf)
+}
+
+func TestBufferToInt_UnitTest(t *testing.T) {
+	// Construct a known big-endian buffer
+	buf := []byte{0x00, 0x00, 0x01, 0x2C} // = 300 in big-endian
+	val := bufferToInt(buf)
+	if val != 300 {
+		t.Errorf("bufferToInt(%x) = %d, want 300", buf, val)
+	}
+
+	// Single byte
+	val = bufferToInt([]byte{0x2A})
+	if val != 42 {
+		t.Errorf("bufferToInt([0x2A]) = %d, want 42", val)
+	}
+
+	// Zero
+	val = bufferToInt([]byte{0x00, 0x00, 0x00})
+	if val != 0 {
+		t.Errorf("bufferToInt(zeros) = %d, want 0", val)
+	}
+
+	// Roundtrip with longTo32BytesBE
+	original := 12345678
+	buf32 := longTo32BytesBE(original)
+	recovered := bufferToInt(buf32)
+	if recovered != original {
+		t.Errorf("roundtrip: %d -> longTo32BytesBE -> bufferToInt -> %d", original, recovered)
+	}
+}
