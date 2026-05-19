@@ -4,12 +4,16 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
+	"github.com/LWDJD/ipfar-sdk/arweave"
 	"github.com/LWDJD/ipfar-sdk/verify/ipfs"
 	"github.com/LWDJD/ipfar-sdk/verify/metadata"
 	"github.com/LWDJD/ipfar-sdk/verify/pow"
+	"github.com/ipfs/go-cid"
+	mh "github.com/multiformats/go-multihash"
 )
 
 // 安全等级预设
@@ -122,6 +126,9 @@ type Pipeline struct {
 
 	// CAR 文件解析器（可选，用于 Index 和 Integrity 验证）
 	carFile string // CAR 文件路径
+
+	// gatewayClient 用于引用链解析等需要网络访问的验证步骤
+	gatewayClient *arweave.GatewayClient
 }
 
 // NewPipeline 创建新的验证管道
@@ -133,7 +140,7 @@ func NewPipeline(config VerifyConfig) *Pipeline {
 	p.metaValidator = defaultMetaValidator
 	p.powVerifier = defaultPoWVerifier
 	p.indexVerifier = defaultIndexVerifier
-	p.referenceVerifier = defaultReferenceVerifier
+	p.referenceVerifier = p.defaultReferenceVerifier
 	p.integrityVerifier = defaultIntegrityVerifier
 	return p
 }
@@ -150,6 +157,11 @@ func (p *Pipeline) SetCarFile(carPath string) {
 	p.integrityVerifier = func() error {
 		return defaultIntegrityVerifierWithCar(carPath)
 	}
+}
+
+// SetGatewayClient 设置 Arweave 网关客户端，用于引用链解析等网络验证步骤。
+func (p *Pipeline) SetGatewayClient(client *arweave.GatewayClient) {
+	p.gatewayClient = client
 }
 
 // NewPipelineWithPreset 从预设创建验证管道
@@ -365,14 +377,49 @@ func defaultIndexVerifierWithCar(carPath string) error {
 	return nil
 }
 
-// defaultReferenceVerifier 默认引用链验证器
-func defaultReferenceVerifier(meta *metadata.Metadata) error {
+// defaultReferenceVerifier 默认引用链验证器（Pipeline 方法）
+// 解析 metadata 的 reference 字段，验证引用的交易存在且数据完整。
+func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 	// 如果元数据没有引用，则自动通过
 	if meta == nil || !meta.HasReference() {
 		return nil
 	}
-	// 引用链验证需要实际下载被引用的交易数据
-	// 默认实现：占位，实际由外部注入
+
+	// 需要网关客户端才能验证引用链
+	if p.gatewayClient == nil {
+		// 无网关客户端时跳过（向后兼容，允许外部注入验证器）
+		return nil
+	}
+
+	ctx := context.Background()
+	ref := *meta.Reference
+
+	for txID, entry := range ref {
+		// 下载被引用的交易数据
+		data, err := p.gatewayClient.DownloadTransactionData(ctx, txID)
+		if err != nil {
+			return fmt.Errorf("reference chain: failed to download tx %s: %w", txID, err)
+		}
+
+		// 计算下载数据的 CID
+		computedCID, err := computeCIDv1(data)
+		if err != nil {
+			return fmt.Errorf("reference chain: failed to compute CID for tx %s: %w", txID, err)
+		}
+
+		// 检查计算的 CID 是否匹配引用条目中的任意 CID
+		matched := false
+		for _, refCID := range entry.CIDs {
+			if computedCID == refCID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("reference chain: tx %s data CID %s does not match any expected CID in reference", txID, computedCID)
+		}
+	}
+
 	return nil
 }
 
@@ -414,6 +461,16 @@ func defaultIntegrityVerifierWithCar(carPath string) error {
 // ============================================================
 // 便捷函数
 // ============================================================
+
+// computeCIDv1 computes a CID v1 (raw, sha2-256) for the given data.
+func computeCIDv1(data []byte) (string, error) {
+	hash, err := mh.Sum(data, mh.SHA2_256, -1)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash data: %w", err)
+	}
+	c := cid.NewCidV1(cid.Raw, hash)
+	return c.String(), nil
+}
 
 // QuickVerify 快速验证元数据（不涉及 CAR 文件）
 // 执行：元数据校验 + PoW 验证

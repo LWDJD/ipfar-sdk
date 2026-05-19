@@ -43,8 +43,9 @@ var (
 // ReferenceEntry 引用条目：一个被引用的 Arweave 交易
 // 格式：{"txid": {"height": 1913001, "cids": ["cid1", "cid2"]}}
 type ReferenceEntry struct {
-	Height int      `json:"height"` // 区块高度
-	CIDs   []string `json:"cids"`   // CID 列表
+	Height    int      `json:"height"`               // 区块高度（-1 表示同 Bundle）
+	CIDs      []string `json:"cids"`                 // CID 列表
+	BundleTXID string  `json:"bundle_txid,omitempty"` // 可选：Bundle 交易 ID（仅 bundle 模式下的引用）
 }
 
 // ReferenceMap 引用映射：key = Arweave 交易 ID，value = 引用条目
@@ -136,8 +137,8 @@ func (m *Metadata) Validate() error {
 		return fmt.Errorf("%w: %q", ErrInvalidDataTXID, m.DataTXID)
 	}
 
-	// 5. data_height：必填，非负整数
-	if m.DataHeight < 0 {
+	// 5. data_height：必填，非负整数（-1 表示同 Bundle）
+	if m.DataHeight < -1 {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataHeight, m.DataHeight)
 	}
 	// data_height 为 0 时也视为有效（创世区块或未知高度）
@@ -209,8 +210,8 @@ func validateReference(ref *ReferenceMap) error {
 			return fmt.Errorf("%w: empty transaction ID key", ErrInvalidReference)
 		}
 
-		// height 应 >= 0
-		if entry.Height < 0 {
+		// height 应 >= 0（-1 表示同 Bundle）
+		if entry.Height < -1 {
 			return fmt.Errorf("%w: negative height %d for txid %q", ErrInvalidReference, entry.Height, txid)
 		}
 

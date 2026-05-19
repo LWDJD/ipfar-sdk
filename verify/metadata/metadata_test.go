@@ -296,10 +296,18 @@ func TestValidate_InvalidDataTXID(t *testing.T) {
 
 func TestValidate_NegativeDataHeight(t *testing.T) {
 	meta := validMeta()
-	meta.DataHeight = -1
+	meta.DataHeight = -2 // -2 应被拒绝，-1 允许
 	err := meta.Validate()
 	if err == nil {
-		t.Fatal("Expected error for negative data_height")
+		t.Fatal("Expected error for data_height < -1")
+	}
+}
+
+func TestValidate_NegativeOneDataHeight(t *testing.T) {
+	meta := validMeta()
+	meta.DataHeight = -1 // -1 表示同 Bundle，应允许
+	if err := meta.Validate(); err != nil {
+		t.Errorf("data_height = -1 should be valid, got: %v", err)
 	}
 }
 
@@ -428,13 +436,26 @@ func TestValidate_ReferenceNegativeHeight(t *testing.T) {
 	meta := validMeta()
 	meta.Reference = &ReferenceMap{
 		"txid_123456789012345678901234567890123456789012": {
-			Height: -1,
+			Height: -2, // -2 应被拒绝，-1 允许
 			CIDs:   []string{"bafyCID1"},
 		},
 	}
 	err := meta.Validate()
 	if err == nil {
-		t.Fatal("Expected error for reference with negative height")
+		t.Fatal("Expected error for reference with height < -1")
+	}
+}
+
+func TestValidate_ReferenceNegativeOneHeight(t *testing.T) {
+	meta := validMeta()
+	meta.Reference = &ReferenceMap{
+		"txid_123456789012345678901234567890123456789012": {
+			Height: -1, // -1 表示同 Bundle，应允许
+			CIDs:   []string{"bafyCID1"},
+		},
+	}
+	if err := meta.Validate(); err != nil {
+		t.Errorf("Reference with height = -1 should be valid, got: %v", err)
 	}
 }
 
