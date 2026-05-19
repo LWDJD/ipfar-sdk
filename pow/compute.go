@@ -190,6 +190,7 @@ func ComputePoW(ctx context.Context, rootCID, dataTXID string, workers int, prog
 		go func(workerID int) {
 			rng := rand.New(rand.NewSource(seedBase + int64(workerID)))
 			var attempts uint64
+			saltBytes := make([]byte, 8) // reused across iterations
 
 			for {
 				select {
@@ -203,16 +204,18 @@ func ComputePoW(ctx context.Context, rootCID, dataTXID string, workers int, prog
 				}
 
 				salt := rng.Uint64()
-				saltBytes := make([]byte, 8)
 				binary.LittleEndian.PutUint64(saltBytes, salt)
 				hash := argon2.IDKey(password, saltBytes, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
 
 				if hasLeadingZeroBytes(hash, MinLeadingZeroBytes) {
 					if found.CompareAndSwap(false, true) {
 						totalAttempts.Add(1)
+						// Send result; defer cancel() at the top will clean up.
+						// Don't call cancel() here — it creates a race where
+						// the outer select can randomly pick ctx.Done() and
+						// drop the result.
 						select {
 						case resultCh <- result{salt: salt}:
-							cancel()
 						default:
 						}
 					}
@@ -226,7 +229,6 @@ func ComputePoW(ctx context.Context, rootCID, dataTXID string, workers int, prog
 					if found.CompareAndSwap(false, true) {
 						select {
 						case resultCh <- result{err: ErrPoWExhausted}:
-							cancel()
 						default:
 						}
 					}

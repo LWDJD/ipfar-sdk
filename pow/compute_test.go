@@ -35,8 +35,8 @@ func TestDefaultWorkers(t *testing.T) {
 	if n < 1 {
 		t.Errorf("DefaultWorkers() = %d, want at least 1", n)
 	}
-	if n > 4 {
-		t.Errorf("DefaultWorkers() = %d, want at most 4", n)
+	if n > 10 {
+		t.Errorf("DefaultWorkers() = %d, want at most 10", n)
 	}
 	t.Logf("DefaultWorkers() = %d", n)
 }
@@ -146,8 +146,8 @@ func TestComputePoW_MultipleWorkers(t *testing.T) {
 	rootCID := "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
 	dataTXID := "test-multi-worker"
 
-	// Run with 4 workers.
-	salt, err := ComputePoW(context.Background(), rootCID, dataTXID, 4, nil)
+	// Run with 10 workers.
+	salt, err := ComputePoW(context.Background(), rootCID, dataTXID, 10, nil)
 	if err != nil {
 		t.Fatalf("ComputePoW with 4 workers failed: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestComputePoW_MultipleWorkers(t *testing.T) {
 		t.Fatalf("salt %q is not a valid uint64: %v", salt, err)
 	}
 
-	t.Logf("4 workers found salt=%s", salt)
+	t.Logf("10 workers found salt=%s", salt)
 }
 
 func TestComputePoW_NilProgress(t *testing.T) {
