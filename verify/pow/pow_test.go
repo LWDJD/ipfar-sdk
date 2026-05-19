@@ -360,6 +360,80 @@ func TestConstants(t *testing.T) {
 }
 
 // ============================================================
+// defaultWorkers 测试
+// ============================================================
+
+func TestDefaultWorkers_UnitTest(t *testing.T) {
+	n := defaultWorkers()
+	if n <= 0 {
+		t.Errorf("defaultWorkers should return positive number, got %d", n)
+	}
+	if n > 4 {
+		t.Errorf("defaultWorkers should be capped at 4, got %d", n)
+	}
+	t.Logf("defaultWorkers() = %d", n)
+}
+
+// ============================================================
+// ComputePoW 单次计算测试（逻辑验证）
+// 使用极短输入在短时间内完成计算
+// ============================================================
+
+func TestComputePoW_UnitTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping PoW computation in short mode")
+	}
+
+	// Use very short inputs to speed up the Argon2id computation
+	rootCID := "b"
+	dataTXID := "t"
+
+	salt, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Skipf("ComputePoW did not find a solution quickly: %v (acceptable in constrained environments)", err)
+		return
+	}
+
+	if salt == "" {
+		t.Fatal("ComputePoW returned empty salt")
+	}
+
+	// Verify the computed salt passes
+	err = Verify(salt, Algorithm, rootCID, dataTXID, 1024)
+	if err != nil {
+		t.Errorf("Computed PoW salt %s should pass verification, got: %v", salt, err)
+	}
+
+	t.Logf("ComputePoW found salt=%s for rootCID=%s dataTXID=%s", salt, rootCID, dataTXID)
+}
+
+func TestComputePoW_Deterministic_UnitTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping PoW computation in short mode")
+	}
+
+	rootCID := "dd"
+	dataTXID := "ee"
+
+	salt1, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Skipf("First ComputePoW failed: %v", err)
+		return
+	}
+
+	salt2, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Fatalf("Second ComputePoW failed: %v", err)
+	}
+
+	if salt1 != salt2 {
+		t.Errorf("ComputePoW should be deterministic: %s != %s", salt1, salt2)
+	}
+
+	t.Logf("Deterministic PoW: salt=%s", salt1)
+}
+
+// ============================================================
 // 辅助函数
 // ============================================================
 

@@ -325,6 +325,18 @@ func (p *CarParser) readVarintAt(offset int64) (uint64, error) {
 	return value, nil
 }
 
+// readVarintSizeAt reads a varint from the given offset and returns both
+// the decoded value and the number of bytes consumed.
+func (p *CarParser) readVarintSizeAt(offset int64) (uint64, int, error) {
+	br := &byteReader{reader: p.reader, offset: offset}
+	value, err := varint.ReadUvarint(br)
+	if err != nil {
+		return 0, 0, err
+	}
+	bytesRead := int(br.offset - offset)
+	return value, bytesRead, nil
+}
+
 // ValidateRoots 验证根 CIDs
 func (p *CarParser) ValidateRoots(expectedRoots []cid.Cid) error {
 	info, err := p.ParseInfo()
@@ -391,7 +403,7 @@ func (p *CarParser) findBlockByCID(targetCID cid.Cid) (*Block, *BlockMetadata, e
 	endOffset := int64(info.DataOffset + info.DataSize)
 
 	for offset < endOffset {
-		sectionLen, err := p.readVarintAt(offset)
+		sectionLen, varintSize, err := p.readVarintSizeAt(offset)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -403,7 +415,7 @@ func (p *CarParser) findBlockByCID(targetCID cid.Cid) (*Block, *BlockMetadata, e
 			break
 		}
 
-		cidOffset := offset + 1
+		cidOffset := offset + int64(varintSize)
 		cidBuf := make([]byte, sectionLen)
 		n, err := p.reader.ReadAt(cidBuf, cidOffset)
 		if err != nil && err != io.EOF {
@@ -476,7 +488,12 @@ func (p *CarParser) IterateBlocks(handler func(block *Block) error) error {
 			return err
 		}
 
-		offset += 1 + int64(block.CID.ByteLen()) + int64(len(block.Data))
+		// Re-read the varint at this offset to get the correct size.
+		sectionLenAgain, varintSizeAgain, err := p.readVarintSizeAt(offset)
+		if err != nil {
+			return err
+		}
+		offset += int64(varintSizeAgain) + int64(sectionLenAgain)
 	}
 
 	return nil
@@ -484,7 +501,7 @@ func (p *CarParser) IterateBlocks(handler func(block *Block) error) error {
 
 // readNextBlock 读取下一个数据块
 func (p *CarParser) readNextBlock(offset int64, info *CarInfo) (*Block, *BlockMetadata, error) {
-	sectionLen, err := p.readVarintAt(offset)
+	sectionLen, varintSize, err := p.readVarintSizeAt(offset)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -493,7 +510,7 @@ func (p *CarParser) readNextBlock(offset int64, info *CarInfo) (*Block, *BlockMe
 		return nil, nil, io.EOF
 	}
 
-	cidOffset := offset + 1
+	cidOffset := offset + int64(varintSize)
 	buf := make([]byte, sectionLen)
 	n, err := p.reader.ReadAt(buf, cidOffset)
 	if err != nil && err != io.EOF {

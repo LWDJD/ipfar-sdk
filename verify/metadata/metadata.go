@@ -53,17 +53,18 @@ type ReferenceMap map[string]ReferenceEntry
 // Metadata IPFAR 元数据结构
 // 规范参考: 数据结构规范.md §2.2 JSON 结构
 type Metadata struct {
-	Version      int            `json:"version"`                 // 必填：元数据格式版本（当前为 1）
-	Method       string         `json:"method"`                  // 必填：上传方式 "raw" / "bundle"
-	RootCID      string         `json:"root_cid"`                // 必填：根 CID（Base32）
-	DataTXID     string         `json:"data_txid"`               // 必填：主 CAR 文件 Arweave TX ID
-	DataHeight   int            `json:"data_height"`             // 必填：data_txid 所属区块高度
-	DataSize     int            `json:"data_size"`               // 必填：原始数据大小（字节）
-	Reference    *ReferenceMap  `json:"reference,omitempty"`     // 可选：引用映射（去重/分块）
-	ContentType  string         `json:"content_type,omitempty"`  // 可选：MIME 类型
-	OriginalName string         `json:"original_name,omitempty"` // 可选：原始文件名
-	PoW          string         `json:"pow,omitempty"`           // 条件必填：PoW salt（< 100 MiB 时必填）
-	PoWAlg       string         `json:"pow_alg,omitempty"`       // 条件必填：PoW 算法标识
+	Version      int            `json:"version"`                  // 必填：元数据格式版本（当前为 1）
+	Method       string         `json:"method"`                   // 必填：上传方式 "raw" / "bundle"
+	RootCID      string         `json:"root_cid"`                 // 必填：根 CID（Base32）
+	DataTXID     string         `json:"data_txid"`                // 必填：主 CAR 文件 Arweave TX ID
+	BundleTXID   string         `json:"bundle_txid,omitempty"`    // 可选：Bundle 交易 ID（仅 bundle 模式）
+	DataHeight   int            `json:"data_height"`              // 必填：data_txid 所属区块高度
+	DataSize     int            `json:"data_size"`                // 必填：原始数据大小（字节）
+	Reference    *ReferenceMap  `json:"reference,omitempty"`      // 可选：引用映射（去重/分块）
+	ContentType  string         `json:"content_type,omitempty"`   // 可选：MIME 类型
+	OriginalName string         `json:"original_name,omitempty"`  // 可选：原始文件名
+	PoW          string         `json:"pow,omitempty"`            // 条件必填：PoW salt（< 100 MiB 时必填）
+	PoWAlg       string         `json:"pow_alg,omitempty"`        // 条件必填：PoW 算法标识
 }
 
 // ParseJSON 从 JSON 字节数组解析元数据
@@ -472,4 +473,69 @@ func BuildCARTags(rootCID string, dataSize int64) []Tag {
 // CleanCID 清理 CID 字符串（去除多余空格和引号）
 func CleanCID(cid string) string {
 	return strings.Trim(strings.TrimSpace(cid), "\"")
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// BuildMetaJSON — 构建元数据 JSON（无 base64 包装）
+// ──────────────────────────────────────────────────────────────────────
+
+// MetaOptions holds optional fields for building metadata JSON.
+type MetaOptions struct {
+	Method       string        // "raw" or "bundle" (default "raw")
+	ContentType  string        // MIME type
+	OriginalName string        // original filename
+	PoW          string        // PoW salt (if applicable)
+	PoWAlg       string        // PoW algorithm
+	BundleTXID   string        // bundle txid (if bundle)
+	Reference    *ReferenceMap // optional reference map
+}
+
+// BuildMetaJSON constructs a raw metadata JSON (not base64-wrapped)
+// that can be uploaded directly as an Arweave transaction body.
+//
+// The returned JSON follows the IPFAR metadata specification:
+//
+//	{
+//	  "version": 1,
+//	  "method": "raw",
+//	  "root_cid": "bafkrei...",
+//	  "data_txid": "abc123...",
+//	  "data_height": 1920278,
+//	  "data_size": 1048576,
+//	  "content_type": "application/octet-stream",
+//	  "original_name": "test.bin",
+//	  "pow": "abc123...",
+//	  "pow_alg": "argon2id-light-v1"
+//	}
+func BuildMetaJSON(rootCID, dataTXID string, dataSize int64, dataHeight int, opts *MetaOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &MetaOptions{}
+	}
+
+	method := opts.Method
+	if method == "" {
+		method = MethodRaw
+	}
+
+	meta := Metadata{
+		Version:      Version1,
+		Method:       method,
+		RootCID:      rootCID,
+		DataTXID:     dataTXID,
+		DataHeight:   dataHeight,
+		DataSize:     int(dataSize),
+		ContentType:  opts.ContentType,
+		OriginalName: opts.OriginalName,
+		PoW:          opts.PoW,
+		PoWAlg:       opts.PoWAlg,
+		BundleTXID:   opts.BundleTXID,
+		Reference:    opts.Reference,
+	}
+
+	// Validate before returning
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("BuildMetaJSON: %w", err)
+	}
+
+	return meta.ToJSON()
 }
