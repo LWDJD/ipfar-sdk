@@ -282,6 +282,14 @@ func (gc *GatewayClient) UploadDataChunked(ctx context.Context, wallet *Wallet, 
 	return gc.uploadDataChunked(ctx, wallet, data, int64(len(data)), tags)
 }
 
+// UploadDataRaw uploads raw data bytes (e.g., pre-built ANS-104 bundle) to
+// Arweave as a regular transaction using the chunked upload path.  It is
+// identical to UploadDataChunked but uses the caller-supplied tags without
+// any IPFAR-specific processing.
+func (gc *GatewayClient) UploadDataRaw(ctx context.Context, wallet *Wallet, data []byte, tags []Tag) (*Transaction, *TransactionStatus, error) {
+	return gc.uploadDataChunked(ctx, wallet, data, int64(len(data)), tags)
+}
+
 // uploadDataChunked is the internal implementation.
 func (gc *GatewayClient) uploadDataChunked(
 	ctx context.Context,
