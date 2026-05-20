@@ -12,7 +12,8 @@ import (
 
 // VerifyOptions holds optional configuration for verification.
 type VerifyOptions struct {
-	GatewayURLs []string // Fallback gateways for verification
+	GatewayURLs  []string // Fallback gateways for verification
+	MetadataTXID string   // If set, verify this specific metadata tx directly (skip GraphQL)
 }
 
 // Verify verifies a Root-CID against on-chain data.
@@ -29,6 +30,13 @@ func Verify(ctx context.Context, arw *arweave.GatewayClient, rootCID string, opt
 	}
 
 	result := &VerifyResult{Valid: true}
+
+	// ── Direct metadata TXID path (skip GraphQL) ──────────────────────
+	if opts.MetadataTXID != "" {
+		return verifyWithMetadataTXID(ctx, arw, rootCID, opts, result)
+	}
+
+	// ── GraphQL query path (original) ─────────────────────────────────
 	gateways := collectGatewayURLs(arw, opts.GatewayURLs)
 
 	// ── 1. Find and validate metadata ──────────────────────────────────
@@ -115,6 +123,95 @@ func Verify(ctx context.Context, arw *arweave.GatewayClient, rootCID string, opt
 		}
 	} else {
 		// Large file — PoW not required
+		result.PoWVerified = true
+	}
+
+	return result, nil
+}
+
+// ── Direct metadata TXID verification ──────────────────────────────────
+
+// verifyWithMetadataTXID verifies using a specific metadata transaction ID,
+// bypassing the GraphQL query.  This is useful when GraphQL is unavailable
+// or the caller already knows the exact metadata transaction.
+func verifyWithMetadataTXID(ctx context.Context, arw *arweave.GatewayClient, rootCID string, opts *VerifyOptions, result *VerifyResult) (*VerifyResult, error) {
+	// 1. Download metadata raw data
+	metaData, err := DownloadRaw(ctx, arw, opts.MetadataTXID)
+	if err != nil {
+		result.AddError(fmt.Sprintf("download metadata %s: %v", opts.MetadataTXID, err))
+		return result, nil
+	}
+
+	// 2. Parse metadata (supports raw JSON and base64)
+	meta, err := tryParseMetadata(metaData)
+	if err != nil {
+		result.AddError(fmt.Sprintf("parse metadata %s: %v", opts.MetadataTXID, err))
+		return result, nil
+	}
+
+	// 3. Validate metadata structure
+	if err := meta.Validate(); err != nil {
+		result.AddError(fmt.Sprintf("metadata validation: %v", err))
+		return result, nil
+	}
+
+	// 4. Verify root_cid matches
+	if meta.RootCID != rootCID {
+		result.AddError(fmt.Sprintf("root_cid mismatch: metadata has %s, expected %s", meta.RootCID, rootCID))
+		return result, nil
+	}
+	result.MetaVerified = true
+
+	// 5. Verify metadata transaction tags
+	if tags, err := arw.GetTransactionTags(ctx, opts.MetadataTXID); err != nil {
+		result.AddError(fmt.Sprintf("get metadata tags: %v", err))
+	} else {
+		// Convert arweave.Tag → sdkmeta.Tag
+		metaTags := make([]sdkmeta.Tag, len(tags))
+		for i, t := range tags {
+			metaTags[i] = sdkmeta.Tag{Name: t.Name, Value: t.Value}
+		}
+		if err := sdkmeta.ValidateTags(metaTags); err != nil {
+			result.AddError(fmt.Sprintf("metadata tags: %v", err))
+		}
+	}
+
+	// 6. Download CAR data
+	gateways := collectGatewayURLs(arw, opts.GatewayURLs)
+	carVerified := false
+	for _, gwURL := range gateways {
+		gw := arweave.NewGatewayClient(gwURL)
+		carData, err := gw.DownloadTransactionData(ctx, meta.DataTXID)
+		if err != nil {
+			continue
+		}
+
+		expectedCID, err := cid.Decode(rootCID)
+		if err != nil {
+			result.AddError(fmt.Sprintf("invalid root CID: %v", err))
+			return result, nil
+		}
+
+		if verifyLocalCAR(carData, expectedCID) {
+			carVerified = true
+			break
+		}
+	}
+
+	if carVerified {
+		result.CARVerified = true
+	} else {
+		result.AddError("CAR data verification failed on all gateways")
+	}
+
+	// 7. Verify PoW if applicable
+	if meta.NeedsPoW() {
+		if meta.PoW != "" && meta.PoWAlg != "" {
+			result.PoWVerified = true
+		} else {
+			result.AddError("PoW required but missing")
+		}
+	} else {
 		result.PoWVerified = true
 	}
 
