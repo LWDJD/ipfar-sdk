@@ -21,8 +21,8 @@ import (
 const (
 	SecurityStrict   = "strict"   // 全开，最安全
 	SecurityBalanced = "balanced" // 均衡模式
-	SecurityLight    = "light"    // 仅验证 PoW 与引用链（默认）
-	SecurityTrusted  = "trusted"  // 仅验证元数据，适合开发测试
+	SecurityLight    = "light"    // 验证 PoW、Index 与引用链（默认）
+	SecurityTrusted  = "trusted"  // 仅验证元数据与 Index，适合开发测试
 )
 
 // 验证步骤标识
@@ -83,13 +83,13 @@ var PresetConfigs = map[string]VerifyConfig{
 	},
 	SecurityLight: {
 		VerifyPoW:            true,
-		VerifyIndex:          false,
+		VerifyIndex:          true, // spec §3.4: Index always enforced
 		VerifyReferenceChain: true,
 		VerifyIntegrity:      false,
 	},
 	SecurityTrusted: {
 		VerifyPoW:            false,
-		VerifyIndex:          false,
+		VerifyIndex:          true, // spec §3.4: Index always enforced
 		VerifyReferenceChain: false,
 		VerifyIntegrity:      false,
 	},

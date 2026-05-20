@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
 	sdkcar "github.com/LWDJD/ipfar-sdk/verify/ipfs"
@@ -88,15 +89,17 @@ func DownloadRaw(ctx context.Context, arw *arweave.GatewayClient, txID string) (
 // ── Internal helpers ───────────────────────────────────────────────────
 
 // tryParseMetadata attempts to parse metadata from raw bytes.
-// The data may be plain JSON or base64url-encoded JSON.
+// Per spec §2.1, metadata is raw JSON bytes (not Base64URL-encoded).
+// Base64URL fallback is retained for backward compatibility with legacy
+// on-chain data but emits a warning.
 func tryParseMetadata(rawData []byte) (*sdkmeta.Metadata, error) {
-	// Try plain JSON first
+	// Try plain JSON first (spec-compliant path)
 	meta, err := sdkmeta.ParseJSON(rawData)
 	if err == nil {
 		return meta, nil
 	}
 
-	// Try base64url decode
+	// Backward compatibility: try Base64URL decode
 	decoded, decodeErr := base64.RawURLEncoding.DecodeString(string(rawData))
 	if decodeErr != nil {
 		decoded, decodeErr = base64.StdEncoding.DecodeString(string(rawData))
@@ -105,7 +108,12 @@ func tryParseMetadata(rawData []byte) (*sdkmeta.Metadata, error) {
 		return nil, fmt.Errorf("metadata is neither valid JSON nor base64url")
 	}
 
-	return sdkmeta.ParseJSON(decoded)
+	meta, err = sdkmeta.ParseJSON(decoded)
+	if err == nil {
+		msg := "Warning: metadata uses legacy base64 format, consider re-uploading as raw JSON\n"
+		os.Stderr.WriteString(msg)
+	}
+	return meta, err
 }
 
 // extractDataFromCAR extracts the original data bytes from a CAR v2 file.

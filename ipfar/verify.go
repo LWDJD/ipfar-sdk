@@ -393,17 +393,17 @@ func reportProgress(opts *VerifyOptions, step, total int, name string, details [
 }
 
 // validateBlockHeight checks that data_height is valid:
-// must be > 0 unless bundle mode with -1.
+// must be >= -1 (0 is allowed, e.g. genesis block; -1 for bundle).
+// Note: data_height = 0 is technically valid but warrants a warning
+// as it typically indicates an unknown or genesis height.
 func validateBlockHeight(meta *sdkmeta.Metadata) error {
-	if meta.DataHeight <= 0 {
-		if meta.Method == sdkmeta.MethodBundle && meta.DataHeight == -1 {
-			return nil
-		}
-		if meta.DataHeight == 0 {
-			return fmt.Errorf("data_height must be > 0 (got 0)")
-		}
-		return fmt.Errorf("invalid data_height: %d (must be > 0, or -1 for bundle)", meta.DataHeight)
+	if meta.DataHeight < -1 {
+		return fmt.Errorf("invalid data_height: %d (must be >= -1)", meta.DataHeight)
 	}
+	if meta.DataHeight == -1 && meta.Method != sdkmeta.MethodBundle {
+		return fmt.Errorf("data_height is -1 but method is not bundle")
+	}
+	// data_height = 0 is allowed (genesis / unknown height)
 	return nil
 }
 
@@ -475,10 +475,10 @@ func validateMetadataFields(meta *sdkmeta.Metadata) []fieldResult {
 	// --- data_height ---
 	dh := meta.DataHeight
 	dhStr := fmt.Sprintf("%d", dh)
-	if dh == 0 {
-		results = append(results, fieldResult{Field: "data_height", Value: dhStr, OK: false, Error: "data_height must be > 0 (got 0)", Note: "> 0, valid block height"})
-	} else if dh < -1 {
-		results = append(results, fieldResult{Field: "data_height", Value: dhStr, OK: false, Error: fmt.Sprintf("invalid height: %d", dh), Note: "> 0, valid block height (or -1 for bundle)"})
+	if dh < -1 {
+		results = append(results, fieldResult{Field: "data_height", Value: dhStr, OK: false, Error: fmt.Sprintf("invalid height: %d", dh), Note: ">= -1, valid block height (or -1 for bundle)"})
+	} else if dh == 0 {
+		results = append(results, fieldResult{Field: "data_height", Value: dhStr, OK: true, Note: "genesis / unknown height (0)"})
 	} else if dh == -1 {
 		if meta.Method == sdkmeta.MethodBundle {
 			results = append(results, fieldResult{Field: "data_height", Value: dhStr, OK: true, Note: "bundle mode (-1)"})
@@ -654,13 +654,8 @@ func verifyLocalCAR(carBytes []byte, expectedCID cid.Cid) bool {
 		return false
 	}
 
+	// CAR v1 is not supported — spec §3.1 requires CAR v2
 	if info.Version != 2 {
-		// Try v1 as fallback
-		for _, root := range info.Roots {
-			if root.Equals(expectedCID) {
-				return true
-			}
-		}
 		return false
 	}
 

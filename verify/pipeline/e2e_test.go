@@ -344,12 +344,12 @@ func TestE2E_FullPipeline_Light(t *testing.T) {
 		t.Fatal("Full pipeline light mode should pass")
 	}
 
-	// Light: PoW=on, Index=off, ReferenceChain=on, Integrity=off
+	// Light: PoW=on, Index=on (spec §3.4: always enforced), ReferenceChain=on, Integrity=off
 	for _, r := range result.Results {
 		switch r.Step {
 		case StepIndex:
-			if !r.Skipped {
-				t.Error("Index should be skipped in light mode")
+			if r.Skipped {
+				t.Error("Index should NOT be skipped in light mode — spec §3.4 always enforced")
 			}
 		case StepIntegrity:
 			if !r.Skipped {
