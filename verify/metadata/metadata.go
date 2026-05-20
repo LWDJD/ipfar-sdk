@@ -143,6 +143,11 @@ func (m *Metadata) Validate() error {
 	}
 	// data_height 为 0 时也视为有效（创世区块或未知高度）
 
+	// 5b. bundle_txid 约束：当 data_height = -1（同 Bundle）时，bundle_txid 必须为 "none"
+	if m.DataHeight == -1 && m.BundleTXID != "none" {
+		return fmt.Errorf("bundle_txid must be \"none\" when data_height = -1, got %q", m.BundleTXID)
+	}
+
 	// 6. data_size：必填，正整数
 	if m.DataSize <= 0 {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataSize, m.DataSize)
@@ -474,6 +479,58 @@ func BuildCARTags(rootCID string, dataSize int64) []Tag {
 // CleanCID 清理 CID 字符串（去除多余空格和引号）
 func CleanCID(cid string) string {
 	return strings.Trim(strings.TrimSpace(cid), "\"")
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Reference 格式转换
+// ──────────────────────────────────────────────────────────────────────
+
+// ReferenceToLocal converts a ReferenceMap (transmission format: txid→{height, cids})
+// to local lookup format: cid→txid.
+//
+// This is useful for random-access scenarios where you have a CID and need
+// to quickly find which Arweave transaction contains it.
+//
+// Transmission format (规范 §4.5):
+//
+//	{
+//	  "txid_A": {"height": 1913001, "cids": ["cid1", "cid2"]},
+//	  "txid_B": {"height": 1913002, "cids": ["cid3"]}
+//	}
+//
+// Local format:
+//
+//	{
+//	  "cid1": "txid_A",
+//	  "cid2": "txid_A",
+//	  "cid3": "txid_B"
+//	}
+func ReferenceToLocal(ref ReferenceMap) map[string]string {
+	result := make(map[string]string)
+	for txid, entry := range ref {
+		for _, cid := range entry.CIDs {
+			result[cid] = txid
+		}
+	}
+	return result
+}
+
+// LocalToReference converts local format (cid→txid) back to transmission format
+// (ReferenceMap: txid→{height, cids}).
+//
+// Note: height information is not preserved in the local format,
+// so all heights will be set to 0 in the returned ReferenceMap.
+func LocalToReference(local map[string]string) ReferenceMap {
+	ref := make(ReferenceMap)
+	for cid, txid := range local {
+		if _, ok := ref[txid]; !ok {
+			ref[txid] = ReferenceEntry{CIDs: []string{}}
+		}
+		entry := ref[txid]
+		entry.CIDs = append(entry.CIDs, cid)
+		ref[txid] = entry
+	}
+	return ref
 }
 
 // ──────────────────────────────────────────────────────────────────────
