@@ -44,19 +44,19 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	result := &UploadResult{}
 
 	// ── 1. Read file and compute CID ──────────────────────────────────
-	fmt.Fprintf(os.Stderr, "   Computing CID...")
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
 		return result, fmt.Errorf("read file: %w", err)
 	}
 	result.DataSize = int64(len(fileData))
+	fmt.Fprintf(os.Stderr, "   Processing %s (%s bytes)...\n", filepath.Base(filePath), formatNumber(int(len(fileData))))
 
 	rootCID, err := ComputeCID(fileData)
 	if err != nil {
 		return result, fmt.Errorf("compute CID: %w", err)
 	}
 	result.RootCID = rootCID.String()
-	fmt.Fprintf(os.Stderr, " done (%s)\n", result.RootCID)
+	fmt.Fprintf(os.Stderr, "   CID: %s\n", result.RootCID)
 
 	// ── 2. Dedup / Upload CAR ────────────────────────────────────────
 	gateways := opts.GatewayURLs

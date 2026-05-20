@@ -128,9 +128,17 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 			continue
 		}
 
-		// Get block height
-		status, err := gw.GetTransactionStatus(ctx, txID)
-		if err != nil || status == nil {
+		// Get block height — try current gateway first, then fallback to others
+		var blockHeight int
+		for _, statusURL := range append([]string{gw.GatewayURL}, gwURLs...) {
+			statusClient := arweave.NewGatewayClient(statusURL)
+			statusResp, statusErr := statusClient.GetTransactionStatus(ctx, txID)
+			if statusErr == nil && statusResp != nil && statusResp.BlockHeight > 0 {
+				blockHeight = statusResp.BlockHeight
+				break
+			}
+		}
+		if blockHeight <= 0 {
 			parser.Close()
 			continue
 		}
@@ -142,7 +150,7 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 		}
 
 		parser.Close()
-		return true, status.BlockHeight
+		return true, blockHeight
 	}
 
 	return false, 0
