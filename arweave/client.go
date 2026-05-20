@@ -348,6 +348,46 @@ func (gc *GatewayClient) runGraphQLQuery(ctx context.Context, query string) ([]s
 	return ids, nil
 }
 
+// GetTransactionTags fetches the tags of a transaction by its ID.
+// Tags are returned in their decoded (plain-text) form.
+func (gc *GatewayClient) GetTransactionTags(ctx context.Context, txID string) ([]Tag, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := gc.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d for tx %s", resp.StatusCode, txID)
+	}
+
+	var result struct {
+		Tags []Tag `json:"tags"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode tx %s: %w", txID, err)
+	}
+
+	// Tags from gateway are base64url-encoded; decode them.
+	decoded := make([]Tag, len(result.Tags))
+	for i, t := range result.Tags {
+		nameBytes, err := base64.RawURLEncoding.DecodeString(t.Name)
+		if err != nil {
+			nameBytes = []byte(t.Name)
+		}
+		valueBytes, err := base64.RawURLEncoding.DecodeString(t.Value)
+		if err != nil {
+			valueBytes = []byte(t.Value)
+		}
+		decoded[i] = Tag{Name: string(nameBytes), Value: string(valueBytes)}
+	}
+	return decoded, nil
+}
+
 // DownloadTransactionData downloads the full raw data of a transaction
 // using GET /{txID}.  Returns the raw bytes of the transaction data.
 func (gc *GatewayClient) DownloadTransactionData(ctx context.Context, txID string) ([]byte, error) {
