@@ -43,6 +43,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	result := &UploadResult{}
 
 	// ── 1. Read file and compute CID ──────────────────────────────────
+	fmt.Fprintf(os.Stderr, "   Computing CID...")
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
 		return result, fmt.Errorf("read file: %w", err)
@@ -54,25 +55,31 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		return result, fmt.Errorf("compute CID: %w", err)
 	}
 	result.RootCID = rootCID.String()
+	fmt.Fprintf(os.Stderr, " done (%s)\n", result.RootCID)
 
 	// ── 2. Build CAR v2 ──────────────────────────────────────────────
+	fmt.Fprintf(os.Stderr, "   Building CAR...")
 	carBytes, _, err := BuildCarV2(fileData)
 	if err != nil {
 		return result, fmt.Errorf("build CAR: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
 
 	// ── 3. Dedup / Upload CAR ────────────────────────────────────────
 	gateways := opts.GatewayURLs
 
 	if opts.Bundle {
 		// Bundle mode: wrap CAR in ANS-104 Bundle
+		fmt.Fprintf(os.Stderr, "   Building ANS-104 bundle...")
 		bundleTXID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
 		if err != nil {
 			return result, fmt.Errorf("upload bundle: %w", err)
 		}
 		result.DataTXID = bundleTXID
 		result.DataHeight = bundleHeight
+		fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(bundleTXID), bundleHeight)
 	} else {
+		fmt.Fprintf(os.Stderr, "   Checking for existing CAR on chain...")
 		existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
 		if err != nil {
 			existingCAR = ""
@@ -80,10 +87,13 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		if existingCAR != "" {
 			result.DataTXID = existingCAR
 			result.DataHeight = carHeight
+			fmt.Fprintf(os.Stderr, " found (tx=%s, height=%d, reusing)\n", shortTXID(existingCAR), carHeight)
 		} else {
+			fmt.Fprintf(os.Stderr, " none found (fresh upload)\n")
 			carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
 			arTags := toArweaveTags(carTags)
 
+			fmt.Fprintf(os.Stderr, "   Uploading CAR...")
 			tx, status, err := arw.UploadDataChunked(ctx, wallet, carBytes, arTags)
 			if err != nil {
 				return result, fmt.Errorf("upload CAR: %w", err)
@@ -92,9 +102,15 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 				return result, fmt.Errorf("upload CAR: nil transaction returned")
 			}
 			result.DataTXID = tx.ID
-			if status != nil {
+			if status != nil && status.BlockHeight > 0 {
 				result.DataHeight = status.BlockHeight
+			} else {
+				// Upload succeeded but confirmation timed out — try to get height
+				if retryStatus, retryErr := arw.GetTransactionStatus(ctx, tx.ID); retryErr == nil && retryStatus != nil {
+					result.DataHeight = retryStatus.BlockHeight
+				}
 			}
+			fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(tx.ID), result.DataHeight)
 		}
 	}
 
@@ -111,11 +127,13 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		if workers <= 0 {
 			workers = pow.DefaultWorkers()
 		}
+		fmt.Fprintf(os.Stderr, "   Computing PoW (%d workers)...", workers)
 		powSalt, err = pow.ComputePoW(ctx, result.RootCID, result.DataTXID, workers, nil)
 		if err != nil {
 			return result, fmt.Errorf("compute PoW: %w", err)
 		}
 		powAlg = pow.Algorithm
+		fmt.Fprintf(os.Stderr, " done (salt=%s)\n", truncateSalt(powSalt))
 	}
 
 	contentType := detectContentType(filePath)
@@ -132,12 +150,15 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		metaOpts.BundleTXID = result.DataTXID
 	}
 
+	fmt.Fprintf(os.Stderr, "   Building metadata...")
 	metaJSON, err := sdkmeta.BuildMetaJSON(result.RootCID, result.DataTXID, result.DataSize, result.DataHeight, metaOpts)
 	if err != nil {
 		return result, fmt.Errorf("build metadata: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, " done\n")
 
 	// ── 6. Dedup: check existing metadata ────────────────────────────
+	fmt.Fprintf(os.Stderr, "   Checking for existing metadata...")
 	existingMeta, err := FindExistingMeta(ctx, arw, result.RootCID, result.DataTXID, gateways)
 	if err != nil {
 		// Non-fatal
@@ -145,19 +166,25 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	}
 	if existingMeta != "" {
 		result.MetaTXID = existingMeta
+		fmt.Fprintf(os.Stderr, " found (tx=%s, reusing)\n", shortTXID(existingMeta))
+		fmt.Fprintf(os.Stderr, "   ✅ Upload complete\n")
 		return result, nil
 	}
+	fmt.Fprintf(os.Stderr, " none found (fresh upload)\n")
 
 	// ── 7. Upload metadata (raw JSON, NOT base64-wrapped) ────────────
 	// Note: metadata is uploaded as raw JSON bytes, not base64url-encoded.
 	metaTags := sdkmeta.BuildMetaTags(result.RootCID, result.DataTXID)
 	arMetaTags := toArweaveTags(metaTags)
 
+	fmt.Fprintf(os.Stderr, "   Uploading metadata...")
 	metaTX, _, err := arw.UploadDataChunked(ctx, wallet, metaJSON, arMetaTags)
 	if err != nil {
 		// Metadata confirmation timeout is non-fatal — save txid and continue
 		if metaTX != nil && metaTX.ID != "" {
 			result.MetaTXID = metaTX.ID
+			fmt.Fprintf(os.Stderr, " done (tx=%s)\n", shortTXID(metaTX.ID))
+			fmt.Fprintf(os.Stderr, "   ✅ Upload complete\n")
 			return result, nil
 		}
 		return result, fmt.Errorf("upload metadata: %w", err)
@@ -165,6 +192,8 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	if metaTX != nil {
 		result.MetaTXID = metaTX.ID
 	}
+	fmt.Fprintf(os.Stderr, " done (tx=%s)\n", shortTXID(result.MetaTXID))
+	fmt.Fprintf(os.Stderr, "   ✅ Upload complete\n")
 
 	return result, nil
 }
@@ -203,6 +232,31 @@ func toArweaveTags(tags []sdkmeta.Tag) []arweave.Tag {
 		result[i] = arweave.Tag{Name: t.Name, Value: t.Value}
 	}
 	return result
+}
+
+// formatNumber formats an int with comma separators.
+func formatNumber(n int) string {
+	s := fmt.Sprintf("%d", n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
+// shortTXID returns a short representation of a TXID (first 7 chars + "...")
+func shortTXID(txid string) string {
+	if len(txid) <= 10 {
+		return txid
+	}
+	return txid[:7] + "..."
+}
+
+// truncateSalt returns a short representation of a PoW salt (first 8 chars + "...")
+func truncateSalt(salt string) string {
+	if len(salt) <= 10 {
+		return salt
+	}
+	return salt[:8] + "..."
 }
 
 // uploadAsBundle wraps CAR bytes in an ANS-104 Bundle and uploads it.
