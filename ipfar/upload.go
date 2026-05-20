@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
+	"github.com/LWDJD/ipfar-sdk/bundle"
+	"github.com/LWDJD/ipfar-sdk/pow"
 	sdkmeta "github.com/LWDJD/ipfar-sdk/verify/metadata"
 )
 
@@ -59,31 +61,40 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		return result, fmt.Errorf("build CAR: %w", err)
 	}
 
-	// ── 3. Dedup: check existing CAR ─────────────────────────────────
+	// ── 3. Dedup / Upload CAR ────────────────────────────────────────
 	gateways := opts.GatewayURLs
-	existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
-	if err != nil {
-		// Non-fatal: proceed with fresh upload
-		existingCAR = ""
-	}
-	if existingCAR != "" {
-		result.DataTXID = existingCAR
-		result.DataHeight = carHeight
-	} else {
-		// ── 4. Upload CAR ────────────────────────────────────────────
-		carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
-		arTags := toArweaveTags(carTags)
 
-		tx, status, err := arw.UploadDataChunked(ctx, wallet, carBytes, arTags)
+	if opts.Bundle {
+		// Bundle mode: wrap CAR in ANS-104 Bundle
+		bundleTXID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
 		if err != nil {
-			return result, fmt.Errorf("upload CAR: %w", err)
+			return result, fmt.Errorf("upload bundle: %w", err)
 		}
-		if tx == nil {
-			return result, fmt.Errorf("upload CAR: nil transaction returned")
+		result.DataTXID = bundleTXID
+		result.DataHeight = bundleHeight
+	} else {
+		existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
+		if err != nil {
+			existingCAR = ""
 		}
-		result.DataTXID = tx.ID
-		if status != nil {
-			result.DataHeight = status.BlockHeight
+		if existingCAR != "" {
+			result.DataTXID = existingCAR
+			result.DataHeight = carHeight
+		} else {
+			carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
+			arTags := toArweaveTags(carTags)
+
+			tx, status, err := arw.UploadDataChunked(ctx, wallet, carBytes, arTags)
+			if err != nil {
+				return result, fmt.Errorf("upload CAR: %w", err)
+			}
+			if tx == nil {
+				return result, fmt.Errorf("upload CAR: nil transaction returned")
+			}
+			result.DataTXID = tx.ID
+			if status != nil {
+				result.DataHeight = status.BlockHeight
+			}
 		}
 	}
 
@@ -93,6 +104,20 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		method = sdkmeta.MethodBundle
 	}
 
+	// ── 5a. Compute PoW if required (data_size < 100 MiB) ─────────────
+	var powSalt, powAlg string
+	if result.DataSize < sdkmeta.PoWThreshold {
+		workers := opts.PoWWorkers
+		if workers <= 0 {
+			workers = pow.DefaultWorkers()
+		}
+		powSalt, err = pow.ComputePoW(ctx, result.RootCID, result.DataTXID, workers, nil)
+		if err != nil {
+			return result, fmt.Errorf("compute PoW: %w", err)
+		}
+		powAlg = pow.Algorithm
+	}
+
 	contentType := detectContentType(filePath)
 	originalName := filepath.Base(filePath)
 
@@ -100,6 +125,11 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		Method:       method,
 		ContentType:  contentType,
 		OriginalName: originalName,
+		PoW:          powSalt,
+		PoWAlg:       powAlg,
+	}
+	if opts.Bundle {
+		metaOpts.BundleTXID = result.DataTXID
 	}
 
 	metaJSON, err := sdkmeta.BuildMetaJSON(result.RootCID, result.DataTXID, result.DataSize, result.DataHeight, metaOpts)
@@ -173,4 +203,55 @@ func toArweaveTags(tags []sdkmeta.Tag) []arweave.Tag {
 		result[i] = arweave.Tag{Name: t.Name, Value: t.Value}
 	}
 	return result
+}
+
+// uploadAsBundle wraps CAR bytes in an ANS-104 Bundle and uploads it.
+// Returns the bundle transaction ID and block height.
+func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wallet, carBytes []byte, result *UploadResult, gateways []string) (string, int, error) {
+	// 1. Create ANS-104 DataItem with CAR bytes
+	item := bundle.NewDataItem()
+	item.SetData(carBytes)
+
+	// Set CAR tags on the data item
+	carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
+	for _, t := range carTags {
+		item.AddTag(t.Name, t.Value)
+	}
+
+	// 2. Sign the data item with wallet's RSA key
+	if err := item.SignWithRSA(wallet.PrivateKey); err != nil {
+		return "", 0, fmt.Errorf("sign data item: %w", err)
+	}
+
+	// 3. Build the bundle
+	builder := bundle.NewBundleBuilder()
+	builder.AddItem(item)
+	bundleBytes, err := builder.Build()
+	if err != nil {
+		return "", 0, fmt.Errorf("build bundle: %w", err)
+	}
+
+	// 4. Upload the bundle as a raw transaction
+	bundleTags := []arweave.Tag{
+		{Name: "Protocol", Value: "IPFS-Arweave-Bridge"},
+		{Name: "Protocol-Version", Value: "1"},
+		{Name: "Content-Type", Value: "application/octet-stream"},
+		{Name: "Bundle-Format", Value: "ans-104"},
+		{Name: "Root-CID", Value: result.RootCID},
+	}
+
+	tx, status, err := arw.UploadDataRaw(ctx, wallet, bundleBytes, bundleTags)
+	if err != nil {
+		return "", 0, fmt.Errorf("upload bundle tx: %w", err)
+	}
+	if tx == nil {
+		return "", 0, fmt.Errorf("upload bundle: nil transaction returned")
+	}
+
+	height := 0
+	if status != nil {
+		height = status.BlockHeight
+	}
+
+	return tx.ID, height, nil
 }
