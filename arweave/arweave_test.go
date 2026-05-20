@@ -357,7 +357,7 @@ func TestGatewayClient_GetRewardAndAnchor(t *testing.T) {
 
 func TestGatewayClient_WaitForConfirmation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tx/test-tx" {
+		if r.URL.Path == "/tx/test-tx/status" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"block_height":100,"block_indep_hash":"hash-100"}`))
 			return
