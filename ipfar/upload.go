@@ -58,19 +58,18 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	result.RootCID = rootCID.String()
 	fmt.Fprintf(os.Stderr, " done (%s)\n", result.RootCID)
 
-	// ── 2. Build CAR v2 ──────────────────────────────────────────────
-	fmt.Fprintf(os.Stderr, "   Building CAR...")
-	carBytes, _, err := BuildCarV2(fileData)
-	if err != nil {
-		return result, fmt.Errorf("build CAR: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
-
-	// ── 3. Dedup / Upload CAR ────────────────────────────────────────
+	// ── 2. Dedup / Upload CAR ────────────────────────────────────────
 	gateways := opts.GatewayURLs
 
 	if opts.Bundle {
 		// Bundle mode: wrap CAR in ANS-104 Bundle
+		fmt.Fprintf(os.Stderr, "   Building CAR...")
+		carBytes, _, err := BuildCarV2(fileData)
+		if err != nil {
+			return result, fmt.Errorf("build CAR: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
+
 		fmt.Fprintf(os.Stderr, "   Building ANS-104 bundle...")
 		bundleTXID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
 		if err != nil {
@@ -80,6 +79,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		result.DataHeight = bundleHeight
 		fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(bundleTXID), bundleHeight)
 	} else {
+		// Dedup first: check if CAR already exists on chain before building
 		fmt.Fprintf(os.Stderr, "   Checking for existing CAR on chain...")
 		existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
 		if err != nil {
@@ -91,6 +91,15 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 			fmt.Fprintf(os.Stderr, " found (tx=%s, height=%d, reusing)\n", shortTXID(existingCAR), carHeight)
 		} else {
 			fmt.Fprintf(os.Stderr, " none found (fresh upload)\n")
+
+			// Only build CAR if we actually need to upload
+			fmt.Fprintf(os.Stderr, "   Building CAR...")
+			carBytes, _, err := BuildCarV2(fileData)
+			if err != nil {
+				return result, fmt.Errorf("build CAR: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
+
 			carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
 			arTags := toArweaveTags(carTags)
 
@@ -106,23 +115,35 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 			if status != nil && status.BlockHeight > 0 {
 				result.DataHeight = status.BlockHeight
 			} else {
-				// Retry getting tx status: 3 attempts, 10s apart
+				// Retry getting tx status: 3 attempts, 10s apart.
+				// Try primary gateway first, then fallback to ar-io.dev.
+				fallbackClients := []*arweave.GatewayClient{
+					arw,
+					arweave.NewGatewayClient("https://ar-io.dev"),
+				}
 				var lastErr error
 				for i := 0; i < 3; i++ {
-					time.Sleep(10 * time.Second)
-					retryStatus, retryErr := arw.GetTransactionStatus(ctx, tx.ID)
-					if retryErr == nil && retryStatus != nil && retryStatus.BlockHeight > 0 {
-						result.DataHeight = retryStatus.BlockHeight
-						lastErr = nil
+					for _, client := range fallbackClients {
+						retryStatus, retryErr := client.GetTransactionStatus(ctx, tx.ID)
+						if retryErr == nil && retryStatus != nil && retryStatus.BlockHeight > 0 {
+							result.DataHeight = retryStatus.BlockHeight
+							lastErr = nil
+							break
+						}
+						lastErr = retryErr
+						if lastErr == nil {
+							lastErr = fmt.Errorf("block height is 0")
+						}
+					}
+					if result.DataHeight > 0 {
 						break
 					}
-					lastErr = retryErr
-					if lastErr == nil {
-						lastErr = fmt.Errorf("block height is 0")
+					if i < 2 {
+						time.Sleep(10 * time.Second)
 					}
 				}
-				if lastErr != nil {
-					return result, fmt.Errorf("failed to get CAR tx block height after retries: %w", lastErr)
+				if result.DataHeight <= 0 {
+					return result, fmt.Errorf("failed to get CAR tx block height after retries (tx=%s)", tx.ID)
 				}
 			}
 			fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(tx.ID), result.DataHeight)
