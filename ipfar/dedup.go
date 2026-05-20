@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
@@ -29,21 +30,31 @@ func FindExistingCAR(ctx context.Context, arw *arweave.GatewayClient, rootCID st
 	if arw == nil {
 		return "", 0, fmt.Errorf("gateway client is nil")
 	}
-	candidates, err := arw.QueryExistingCARs(ctx, rootCID, 8)
-	if err != nil {
-		return "", 0, fmt.Errorf("dedup query failed: %w", err)
+	var candidates []string
+	var lastErr error
+	gwURLs := collectGatewayURLs(arw, gateways)
+	for _, gwURL := range gwURLs {
+		gw := arweave.NewGatewayClient(gwURL)
+		candidates, lastErr = gw.QueryExistingCARs(ctx, rootCID, 8)
+		if lastErr == nil {
+			break
+		}
+	}
+	if lastErr != nil {
+		return "", 0, fmt.Errorf("dedup query failed (all gateways): %w", lastErr)
 	}
 	if len(candidates) == 0 {
 		return "", 0, nil
 	}
 
-	gwURLs := collectGatewayURLs(arw, gateways)
+	gwURLs = collectGatewayURLs(arw, gateways)
 
 	for _, txID := range candidates {
 		verified, height := verifyRemoteCAR(ctx, arw, txID, rootCID, gwURLs)
 		if verified {
 			return txID, height, nil
 		}
+		fmt.Fprintf(os.Stderr, "   Candidate %s verification failed\n", shortTXID(txID))
 	}
 
 	return "", 0, nil
@@ -90,6 +101,7 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 
 		fileSize, err := gw.GetTransactionDataSize(ctx, txID)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s failed: %v\n", shortTXID(txID), gwURL, err)
 			continue
 		}
 
@@ -98,19 +110,25 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 		reader := newRemoteCarReader(ctx, gw, txID, fileSize)
 		parser, err := sdkcar.NewCarParserFromReader(reader, fileSize)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s parse failed: %v\n", shortTXID(txID), gwURL, err)
 			continue
 		}
 
 		info, err := parser.ParseInfo()
-		parser.Close()
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s info parse failed: %v\n", shortTXID(txID), gwURL, err)
+			parser.Close()
 			continue
 		}
 
 		if info.Version != 2 {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s wrong CAR version: %d\n", shortTXID(txID), gwURL, info.Version)
+			parser.Close()
 			continue
 		}
 		if !info.HasIndex {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s missing index\n", shortTXID(txID), gwURL)
+			parser.Close()
 			continue
 		}
 
@@ -122,16 +140,36 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 			}
 		}
 		if !found {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s root CID mismatch\n", shortTXID(txID), gwURL)
+			parser.Close()
 			continue
 		}
 
-		// Get block height
-		status, err := gw.GetTransactionStatus(ctx, txID)
-		if err != nil || status == nil {
+		// Get block height — try current gateway first, then fallback to others
+		var blockHeight int
+		for _, statusURL := range append([]string{gw.GatewayURL}, gwURLs...) {
+			statusClient := arweave.NewGatewayClient(statusURL)
+			statusResp, statusErr := statusClient.GetTransactionStatus(ctx, txID)
+			if statusErr == nil && statusResp != nil && statusResp.BlockHeight > 0 {
+				blockHeight = statusResp.BlockHeight
+				break
+			}
+		}
+		if blockHeight <= 0 {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s no block height\n", shortTXID(txID), gwURL)
+			parser.Close()
 			continue
 		}
 
-		return true, status.BlockHeight
+		// Validate index integrity
+		if err := parser.ValidateIndex(); err != nil {
+			fmt.Fprintf(os.Stderr, "   Candidate %s via %s index validation failed: %v\n", shortTXID(txID), gwURL, err)
+			parser.Close()
+			continue
+		}
+
+		parser.Close()
+		return true, blockHeight
 	}
 
 	return false, 0
@@ -231,9 +269,41 @@ func (r *remoteCarReader) ReadAt(p []byte, off int64) (n int, err error) {
 	return n, nil
 }
 
+// ── Exported verification helpers ─────────────────────────────────────
+
+// VerifyRemoteCAR downloads key portions of a remote CAR and validates it
+// against the expected root CID.  Tries the primary gateway plus any extra
+// gateways provided (falling back to DefaultFallbackGateways).
+//
+// Returns (true, nil) on success or (false, error) when all gateways fail.
+func VerifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, expectedRootCID string, gateways []string) (bool, error) {
+	gwURLs := collectGatewayURLs(primary, gateways)
+	verified, _ := verifyRemoteCAR(ctx, primary, txID, expectedRootCID, gwURLs)
+	if verified {
+		return true, nil
+	}
+	return false, fmt.Errorf("remote CAR verification failed for tx %s", txID)
+}
+
+// VerifyRemoteMeta downloads and validates remote metadata against the
+// expected rootCID and dataTXID.  Tries the primary gateway plus any extra
+// gateways provided (falling back to DefaultFallbackGateways).
+//
+// Returns (true, nil) on success or (false, error) when all gateways fail.
+func VerifyRemoteMeta(ctx context.Context, primary *arweave.GatewayClient, txID, expectedRootCID, expectedDataTXID string, gateways []string) (bool, error) {
+	gwURLs := collectGatewayURLs(primary, gateways)
+	if verifyRemoteMeta(ctx, primary, txID, expectedRootCID, expectedDataTXID, gwURLs) {
+		return true, nil
+	}
+	return false, fmt.Errorf("remote metadata verification failed for tx %s", txID)
+}
+
 // ── Gateway URL collection ─────────────────────────────────────────────
 
 // collectGatewayURLs returns a deduplicated list of gateway URLs.
+//
+// When extra is nil, DefaultFallbackGateways are appended after the primary
+// URL.  Pass an empty (but non-nil) slice to use only the primary gateway.
 func collectGatewayURLs(primary *arweave.GatewayClient, extra []string) []string {
 	seen := make(map[string]bool)
 	var urls []string
@@ -242,7 +312,12 @@ func collectGatewayURLs(primary *arweave.GatewayClient, extra []string) []string
 	seen[primaryURL] = true
 	urls = append(urls, primaryURL)
 
-	all := append(extra, DefaultFallbackGateways...)
+	var all []string
+	if extra == nil {
+		all = DefaultFallbackGateways
+	} else {
+		all = extra
+	}
 	for _, u := range all {
 		u = strings.TrimRight(u, "/")
 		if !seen[u] {

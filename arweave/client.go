@@ -119,12 +119,11 @@ type TransactionStatus struct {
 	Confirmed   bool
 	BlockHeight int
 	BlockHash   string
-	DataSize    int64 // populated from the gateway's data_size field when available
 }
 
 // GetTransactionStatus checks whether a transaction is confirmed.
 func (gc *GatewayClient) GetTransactionStatus(ctx context.Context, txID string) (*TransactionStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID+"/status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,37 +144,49 @@ func (gc *GatewayClient) GetTransactionStatus(ctx context.Context, txID string) 
 		BlockHeight           int    `json:"block_height"`
 		BlockIndepHash        string `json:"block_indep_hash"`
 		NumberOfConfirmations int    `json:"number_of_confirmations"`
-		DataSize              string `json:"data_size"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	status := &TransactionStatus{
+	return &TransactionStatus{
 		Confirmed:   result.BlockHeight > 0,
 		BlockHeight: result.BlockHeight,
 		BlockHash:   result.BlockIndepHash,
-	}
-
-	if result.DataSize != "" {
-		if ds, err := strconv.ParseInt(result.DataSize, 10, 64); err == nil {
-			status.DataSize = ds
-		}
-	}
-
-	return status, nil
+	}, nil
 }
 
 // GetTransactionDataSize fetches the data_size field from GET /tx/{txID}.
 func (gc *GatewayClient) GetTransactionDataSize(ctx context.Context, txID string) (int64, error) {
-	status, err := gc.GetTransactionStatus(ctx, txID)
+	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID, nil)
 	if err != nil {
 		return 0, err
 	}
-	if status.DataSize <= 0 {
+	resp, err := gc.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("gateway returned %d for tx %s", resp.StatusCode, txID)
+	}
+
+	var result struct {
+		DataSize string `json:"data_size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode tx %s: %w", txID, err)
+	}
+
+	size, err := strconv.ParseInt(result.DataSize, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid data_size for tx %s: %w", txID, err)
+	}
+	if size <= 0 {
 		return 0, fmt.Errorf("data_size not available for tx %s", txID)
 	}
-	return status.DataSize, nil
+	return size, nil
 }
 
 // WaitForConfirmation polls the gateway until the transaction is confirmed
