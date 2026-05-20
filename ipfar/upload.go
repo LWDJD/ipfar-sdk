@@ -83,6 +83,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		fmt.Fprintf(os.Stderr, "   Checking for existing CAR on chain...")
 		existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, " warning: dedup query failed (%v), proceeding with fresh upload\n", err)
 			existingCAR = ""
 		}
 		if existingCAR != "" {

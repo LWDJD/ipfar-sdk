@@ -29,15 +29,24 @@ func FindExistingCAR(ctx context.Context, arw *arweave.GatewayClient, rootCID st
 	if arw == nil {
 		return "", 0, fmt.Errorf("gateway client is nil")
 	}
-	candidates, err := arw.QueryExistingCARs(ctx, rootCID, 8)
-	if err != nil {
-		return "", 0, fmt.Errorf("dedup query failed: %w", err)
+	var candidates []string
+	var lastErr error
+	gwURLs := collectGatewayURLs(arw, gateways)
+	for _, gwURL := range gwURLs {
+		gw := arweave.NewGatewayClient(gwURL)
+		candidates, lastErr = gw.QueryExistingCARs(ctx, rootCID, 8)
+		if lastErr == nil {
+			break
+		}
+	}
+	if lastErr != nil {
+		return "", 0, fmt.Errorf("dedup query failed (all gateways): %w", lastErr)
 	}
 	if len(candidates) == 0 {
 		return "", 0, nil
 	}
 
-	gwURLs := collectGatewayURLs(arw, gateways)
+	gwURLs = collectGatewayURLs(arw, gateways)
 
 	for _, txID := range candidates {
 		verified, height := verifyRemoteCAR(ctx, arw, txID, rootCID, gwURLs)
