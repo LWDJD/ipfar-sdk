@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
 	"github.com/LWDJD/ipfar-sdk/bundle"
@@ -105,9 +106,23 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 			if status != nil && status.BlockHeight > 0 {
 				result.DataHeight = status.BlockHeight
 			} else {
-				// Upload succeeded but confirmation timed out — try to get height
-				if retryStatus, retryErr := arw.GetTransactionStatus(ctx, tx.ID); retryErr == nil && retryStatus != nil {
-					result.DataHeight = retryStatus.BlockHeight
+				// Retry getting tx status: 3 attempts, 10s apart
+				var lastErr error
+				for i := 0; i < 3; i++ {
+					time.Sleep(10 * time.Second)
+					retryStatus, retryErr := arw.GetTransactionStatus(ctx, tx.ID)
+					if retryErr == nil && retryStatus != nil && retryStatus.BlockHeight > 0 {
+						result.DataHeight = retryStatus.BlockHeight
+						lastErr = nil
+						break
+					}
+					lastErr = retryErr
+					if lastErr == nil {
+						lastErr = fmt.Errorf("block height is 0")
+					}
+				}
+				if lastErr != nil {
+					return result, fmt.Errorf("failed to get CAR tx block height after retries: %w", lastErr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(tx.ID), result.DataHeight)
