@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
+	"github.com/LWDJD/ipfar-sdk/log"
 	sdkcar "github.com/LWDJD/ipfar-sdk/verify/ipfs"
 	"github.com/ipfs/go-cid"
 )
@@ -54,7 +54,7 @@ func FindExistingCAR(ctx context.Context, arw *arweave.GatewayClient, rootCID st
 		if verified {
 			return txID, height, nil
 		}
-		fmt.Fprintf(os.Stderr, "   Candidate %s verification failed\n", shortTXID(txID))
+		log.Warn(ctx, "candidate %s verification failed", shortTXID(txID))
 	}
 
 	return "", 0, nil
@@ -101,7 +101,7 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 
 		fileSize, err := gw.GetTransactionDataSize(ctx, txID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s failed: %v\n", shortTXID(txID), gwURL, err)
+			log.Warn(ctx, "candidate %s via %s failed: %v", shortTXID(txID), gwURL, err)
 			continue
 		}
 
@@ -110,24 +110,24 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 		reader := newRemoteCarReader(ctx, gw, txID, fileSize)
 		parser, err := sdkcar.NewCarParserFromReader(reader, fileSize)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s parse failed: %v\n", shortTXID(txID), gwURL, err)
+			log.Warn(ctx, "candidate %s via %s parse failed: %v", shortTXID(txID), gwURL, err)
 			continue
 		}
 
 		info, err := parser.ParseInfo()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s info parse failed: %v\n", shortTXID(txID), gwURL, err)
+			log.Warn(ctx, "candidate %s via %s info parse failed: %v", shortTXID(txID), gwURL, err)
 			parser.Close()
 			continue
 		}
 
 		if info.Version != 2 {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s wrong CAR version: %d\n", shortTXID(txID), gwURL, info.Version)
+			log.Warn(ctx, "candidate %s via %s wrong CAR version: %d", shortTXID(txID), gwURL, info.Version)
 			parser.Close()
 			continue
 		}
 		if !info.HasIndex {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s missing index\n", shortTXID(txID), gwURL)
+			log.Warn(ctx, "candidate %s via %s missing index", shortTXID(txID), gwURL)
 			parser.Close()
 			continue
 		}
@@ -140,7 +140,7 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 			}
 		}
 		if !found {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s root CID mismatch\n", shortTXID(txID), gwURL)
+			log.Warn(ctx, "candidate %s via %s root CID mismatch", shortTXID(txID), gwURL)
 			parser.Close()
 			continue
 		}
@@ -156,14 +156,14 @@ func verifyRemoteCAR(ctx context.Context, primary *arweave.GatewayClient, txID, 
 			}
 		}
 		if blockHeight <= 0 {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s no block height\n", shortTXID(txID), gwURL)
+			log.Warn(ctx, "candidate %s via %s no block height", shortTXID(txID), gwURL)
 			parser.Close()
 			continue
 		}
 
 		// Validate index integrity
 		if err := parser.ValidateIndex(); err != nil {
-			fmt.Fprintf(os.Stderr, "   Candidate %s via %s index validation failed: %v\n", shortTXID(txID), gwURL, err)
+			log.Warn(ctx, "candidate %s via %s index validation failed: %v", shortTXID(txID), gwURL, err)
 			parser.Close()
 			continue
 		}

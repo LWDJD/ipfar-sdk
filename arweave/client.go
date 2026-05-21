@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LWDJD/ipfar-sdk/log"
 )
 
 // GatewayClient interacts with an Arweave gateway HTTP API.
@@ -90,6 +92,7 @@ func (gc *GatewayClient) SubmitTransaction(ctx context.Context, tx *Transaction)
 		return "", err
 	}
 
+	log.Debug(ctx, "POST /tx (id=%s)", tx.ID)
 	req, err := http.NewRequestWithContext(ctx, "POST", gc.GatewayURL+"/tx", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -123,6 +126,7 @@ type TransactionStatus struct {
 
 // GetTransactionStatus checks whether a transaction is confirmed.
 func (gc *GatewayClient) GetTransactionStatus(ctx context.Context, txID string) (*TransactionStatus, error) {
+	log.Debug(ctx, "GET /tx/%s/status", txID)
 	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID+"/status", nil)
 	if err != nil {
 		return nil, err
@@ -330,6 +334,7 @@ func (gc *GatewayClient) runGraphQLQuery(ctx context.Context, query string) ([]s
 // GetTransactionTags fetches the tags of a transaction by its ID.
 // Tags are returned in their decoded (plain-text) form.
 func (gc *GatewayClient) GetTransactionTags(ctx context.Context, txID string) ([]Tag, error) {
+	log.Debug(ctx, "GET /tx/%s (tags)", txID)
 	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx/"+txID, nil)
 	if err != nil {
 		return nil, err
@@ -371,6 +376,7 @@ func (gc *GatewayClient) GetTransactionTags(ctx context.Context, txID string) ([
 // using GET /{txID}.  Returns the raw bytes of the transaction data.
 func (gc *GatewayClient) DownloadTransactionData(ctx context.Context, txID string) ([]byte, error) {
 	url := gc.GatewayURL + "/" + txID
+	log.Debug(ctx, "GET %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)

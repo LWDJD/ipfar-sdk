@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/LWDJD/ipfar-sdk/log"
 )
 
 // GraphQLQuery builds Arweave GraphQL queries for transactions.
@@ -89,5 +91,7 @@ func (q *GraphQLQuery) Build() string {
 
 // RunGraphQL executes the query against the gateway and returns transaction IDs.
 func (gc *GatewayClient) RunGraphQL(ctx context.Context, query *GraphQLQuery) ([]string, error) {
-	return gc.runGraphQLQuery(ctx, query.Build())
+	q := query.Build()
+	log.Debug(ctx, "GraphQL query: %s", q)
+	return gc.runGraphQLQuery(ctx, q)
 }

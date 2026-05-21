@@ -10,6 +10,7 @@ import (
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
 	"github.com/LWDJD/ipfar-sdk/bundle"
+	"github.com/LWDJD/ipfar-sdk/log"
 	"github.com/LWDJD/ipfar-sdk/pow"
 	sdkmeta "github.com/LWDJD/ipfar-sdk/verify/metadata"
 )
@@ -63,14 +64,14 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 
 	if opts.Bundle {
 		// Bundle mode: wrap CAR in ANS-104 Bundle
-		fmt.Fprintf(os.Stderr, "   Building CAR...")
+		log.Info(ctx, "building CAR...")
 		carBytes, _, err := BuildCarV2(fileData)
 		if err != nil {
 			return result, fmt.Errorf("build CAR: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
 
-		fmt.Fprintf(os.Stderr, "   Building ANS-104 bundle...")
+		log.Info(ctx, "building ANS-104 bundle...")
 		bundleTXID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
 		if err != nil {
 			return result, fmt.Errorf("upload bundle: %w", err)
@@ -83,7 +84,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		fmt.Fprintf(os.Stderr, "   Checking for existing CAR on chain...")
 		existingCAR, carHeight, err := FindExistingCAR(ctx, arw, result.RootCID, gateways)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, " warning: dedup query failed (%v), proceeding with fresh upload\n", err)
+			log.Warn(ctx, "dedup query failed (%v), proceeding with fresh upload", err)
 			existingCAR = ""
 		}
 		if existingCAR != "" {
@@ -94,7 +95,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 			fmt.Fprintf(os.Stderr, " none found (fresh upload)\n")
 
 			// Only build CAR if we actually need to upload
-			fmt.Fprintf(os.Stderr, "   Building CAR...")
+			log.Info(ctx, "building CAR...")
 			carBytes, _, err := BuildCarV2(fileData)
 			if err != nil {
 				return result, fmt.Errorf("build CAR: %w", err)
@@ -104,7 +105,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 			carTags := sdkmeta.BuildCARTags(result.RootCID, result.DataSize)
 			arTags := toArweaveTags(carTags)
 
-			fmt.Fprintf(os.Stderr, "   Uploading CAR...")
+			log.Info(ctx, "uploading CAR...")
 			tx, status, err := arw.UploadDataChunked(ctx, wallet, carBytes, arTags)
 			if err != nil {
 				return result, fmt.Errorf("upload CAR: %w", err)
@@ -164,7 +165,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		if workers <= 0 {
 			workers = pow.DefaultWorkers()
 		}
-		fmt.Fprintf(os.Stderr, "   Computing PoW (%d workers)...", workers)
+		log.Info(ctx, "computing PoW (%d workers)...", workers)
 		powSalt, err = pow.ComputePoW(ctx, result.RootCID, result.DataTXID, workers, nil)
 		if err != nil {
 			return result, fmt.Errorf("compute PoW: %w", err)
@@ -187,7 +188,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		metaOpts.BundleTXID = result.DataTXID
 	}
 
-	fmt.Fprintf(os.Stderr, "   Building metadata...")
+	log.Info(ctx, "building metadata...")
 	metaJSON, err := sdkmeta.BuildMetaJSON(result.RootCID, result.DataTXID, result.DataSize, result.DataHeight, metaOpts)
 	if err != nil {
 		return result, fmt.Errorf("build metadata: %w", err)
@@ -214,7 +215,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 	metaTags := sdkmeta.BuildMetaTags(result.RootCID, result.DataTXID)
 	arMetaTags := toArweaveTags(metaTags)
 
-	fmt.Fprintf(os.Stderr, "   Uploading metadata...")
+	log.Info(ctx, "uploading metadata...")
 	metaTX, _, err := arw.UploadDataChunked(ctx, wallet, metaJSON, arMetaTags)
 	if err != nil {
 		// Metadata confirmation timeout is non-fatal — save txid and continue
