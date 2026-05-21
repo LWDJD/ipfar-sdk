@@ -19,6 +19,7 @@ import (
 type GatewayClient struct {
 	GatewayURL string
 	client     *http.Client
+	userAgent  string
 }
 
 // NewGatewayClient creates a new GatewayClient for the given gateway URL.
@@ -32,13 +33,70 @@ func NewGatewayClient(gatewayURL string) *GatewayClient {
 }
 
 // SetHTTPClient replaces the internal *http.Client (e.g. for tests).
+// If a User-Agent has been set via SetUserAgent, the transport of the
+// new client will be wrapped to inject the User-Agent header.
 func (gc *GatewayClient) SetHTTPClient(c *http.Client) {
 	gc.client = c
+	gc.ensureUserAgentTransport()
 }
 
 // HTTPClient returns the internal *http.Client.
 func (gc *GatewayClient) HTTPClient() *http.Client {
 	return gc.client
+}
+
+// SetUserAgent sets the User-Agent header for requests made by this client.
+// It wraps the current transport with a User-Agent injecting round tripper.
+func (gc *GatewayClient) SetUserAgent(ua string) {
+	gc.userAgent = ua
+	if gc.client.Transport == nil {
+		gc.client.Transport = &userAgentTransport{
+			next:      http.DefaultTransport,
+			userAgent: ua,
+		}
+	} else if _, ok := gc.client.Transport.(*userAgentTransport); ok {
+		gc.client.Transport.(*userAgentTransport).userAgent = ua
+	} else {
+		gc.client.Transport = &userAgentTransport{
+			next:      gc.client.Transport,
+			userAgent: ua,
+		}
+	}
+}
+
+// userAgentTransport wraps an http.RoundTripper and injects a User-Agent header.
+type userAgentTransport struct {
+	next      http.RoundTripper
+	userAgent string
+}
+
+func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", t.userAgent)
+	}
+	return t.next.RoundTrip(req)
+}
+
+// ensureUserAgentTransport 如果 userAgent 已设置但 transport 尚未包装，则进行包装。
+// 在 SetHTTPClient 被调用后需要调用此方法。
+func (gc *GatewayClient) ensureUserAgentTransport() {
+	if gc.userAgent == "" {
+		return
+	}
+	if gc.client.Transport == nil {
+		gc.client.Transport = &userAgentTransport{
+			next:      http.DefaultTransport,
+			userAgent: gc.userAgent,
+		}
+		return
+	}
+	if _, ok := gc.client.Transport.(*userAgentTransport); ok {
+		return
+	}
+	gc.client.Transport = &userAgentTransport{
+		next:      gc.client.Transport,
+		userAgent: gc.userAgent,
+	}
 }
 
 // =============================================================================
