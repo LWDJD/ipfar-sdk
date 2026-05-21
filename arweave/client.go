@@ -243,26 +243,17 @@ func (gc *GatewayClient) QueryExistingCARs(ctx context.Context, rootCID string, 
 		limit = 8
 	}
 
-	protocolB64 := base64.RawURLEncoding.EncodeToString([]byte("IPFS-Arweave-Bridge"))
 	contentTypeB64 := base64.RawURLEncoding.EncodeToString([]byte("application/vnd.ipld.car"))
+	protocolB64 := base64.RawURLEncoding.EncodeToString([]byte("IPFS-Arweave-Bridge"))
 
-	query := fmt.Sprintf(`{
-		transactions(
-			tags: [
-				{ name: "Root-CID", values: ["%s"] },
-				{ name: "Content-Type", values: ["application/vnd.ipld.car", "%s"] },
-				{ name: "Protocol", values: ["IPFS-Arweave-Bridge", "%s"] }
-			],
-			first: %d,
-			sort: HEIGHT_DESC
-		) {
-			edges {
-				node { id }
-			}
-		}
-	}`, rootCID, contentTypeB64, protocolB64, limit)
+	q := NewGraphQLQuery().
+		AddTagFilter("Root-CID", rootCID).
+		AddTagFilter("Content-Type", "application/vnd.ipld.car", contentTypeB64).
+		AddTagFilter("Protocol", "IPFS-Arweave-Bridge", protocolB64).
+		SetFirst(limit).
+		SetSort("HEIGHT_DESC")
 
-	return gc.runGraphQLQuery(ctx, query)
+	return gc.RunGraphQL(ctx, q)
 }
 
 // QueryExistingMetas queries the Arweave GraphQL endpoint for metadata
@@ -276,37 +267,25 @@ func (gc *GatewayClient) QueryExistingMetas(ctx context.Context, rootCID, dataTX
 		limit = 8
 	}
 
+	rootCIDB64 := base64.RawURLEncoding.EncodeToString([]byte(rootCID))
 	protocolB64 := base64.RawURLEncoding.EncodeToString([]byte("IPFS-Arweave-Bridge"))
 	ipfarTypeB64 := base64.RawURLEncoding.EncodeToString([]byte("meta"))
 	contentTypeB64 := base64.RawURLEncoding.EncodeToString([]byte("application/json"))
-	rootCIDB64 := base64.RawURLEncoding.EncodeToString([]byte(rootCID))
 
-	tagsQuery := fmt.Sprintf(`
-		{ name: "Root-CID", values: ["%s", "%s"] },
-		{ name: "Protocol", values: ["IPFS-Arweave-Bridge", "%s"] },
-		{ name: "IPFAR-Type", values: ["meta", "%s"] },
-		{ name: "Content-Type", values: ["application/json", "%s"] }`,
-		rootCID, rootCIDB64, protocolB64, ipfarTypeB64, contentTypeB64)
+	q := NewGraphQLQuery().
+		AddTagFilter("Root-CID", rootCID, rootCIDB64).
+		AddTagFilter("Protocol", "IPFS-Arweave-Bridge", protocolB64).
+		AddTagFilter("IPFAR-Type", "meta", ipfarTypeB64).
+		AddTagFilter("Content-Type", "application/json", contentTypeB64).
+		SetFirst(limit).
+		SetSort("HEIGHT_DESC")
 
 	if dataTXID != "" {
 		dataTXIDB64 := base64.RawURLEncoding.EncodeToString([]byte(dataTXID))
-		tagsQuery += fmt.Sprintf(`,
-		{ name: "Data-TXID", values: ["%s", "%s"] }`, dataTXID, dataTXIDB64)
+		q.AddTagFilter("Data-TXID", dataTXID, dataTXIDB64)
 	}
 
-	query := fmt.Sprintf(`{
-		transactions(
-			tags: [%s],
-			first: %d,
-			sort: HEIGHT_DESC
-		) {
-			edges {
-				node { id }
-			}
-		}
-	}`, tagsQuery, limit)
-
-	return gc.runGraphQLQuery(ctx, query)
+	return gc.RunGraphQL(ctx, q)
 }
 
 // runGraphQLQuery executes a GraphQL query and returns matching transaction IDs.
