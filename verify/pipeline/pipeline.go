@@ -5,6 +5,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -20,8 +21,8 @@ import (
 const (
 	SecurityStrict   = "strict"   // 全开，最安全
 	SecurityBalanced = "balanced" // 均衡模式
-	SecurityLight    = "light"    // 仅验证 PoW 与引用链（默认）
-	SecurityTrusted  = "trusted"  // 仅验证元数据，适合开发测试
+	SecurityLight    = "light"    // 验证 PoW、Index 与引用链（默认）
+	SecurityTrusted  = "trusted"  // 仅验证元数据与 Index，适合开发测试
 )
 
 // 验证步骤标识
@@ -82,13 +83,13 @@ var PresetConfigs = map[string]VerifyConfig{
 	},
 	SecurityLight: {
 		VerifyPoW:            true,
-		VerifyIndex:          false,
+		VerifyIndex:          true, // spec §3.4: Index always enforced
 		VerifyReferenceChain: true,
 		VerifyIntegrity:      false,
 	},
 	SecurityTrusted: {
 		VerifyPoW:            false,
-		VerifyIndex:          false,
+		VerifyIndex:          true, // spec §3.4: Index always enforced
 		VerifyReferenceChain: false,
 		VerifyIntegrity:      false,
 	},
@@ -377,8 +378,13 @@ func defaultIndexVerifierWithCar(carPath string) error {
 	return nil
 }
 
+// MaxReferenceDepth 引用链最大递归深度（防无限循环）
+const MaxReferenceDepth = 10
+
 // defaultReferenceVerifier 默认引用链验证器（Pipeline 方法）
-// 解析 metadata 的 reference 字段，验证引用的交易存在且数据完整。
+// 解析 metadata 的 reference 字段，递归验证引用链。
+//
+// 规范 §4.6：链式解析自动递归、无深度限制（实现中设置 MaxReferenceDepth=10 防循环）。
 func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 	// 如果元数据没有引用，则自动通过
 	if meta == nil || !meta.HasReference() {
@@ -392,16 +398,37 @@ func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 	}
 
 	ctx := context.Background()
-	ref := *meta.Reference
+	visited := make(map[string]bool) // 防循环
+
+	return p.resolveReferences(ctx, *meta.Reference, visited, 0)
+}
+
+// resolveReferences 递归解析引用链（BFS/DFS）。
+//
+// 对每个引用条目：
+//  1. 下载被引用交易数据
+//  2. 计算 CID 并比对
+//  3. 检查被引用交易是否也有 reference 字段
+//  4. 若有，递归解析
+func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.ReferenceMap, visited map[string]bool, depth int) error {
+	if depth > MaxReferenceDepth {
+		return fmt.Errorf("reference chain: max depth %d exceeded", MaxReferenceDepth)
+	}
 
 	for txID, entry := range ref {
-		// 下载被引用的交易数据
+		// 防循环
+		if visited[txID] {
+			continue
+		}
+		visited[txID] = true
+
+		// 1. 下载被引用的交易数据
 		data, err := p.gatewayClient.DownloadTransactionData(ctx, txID)
 		if err != nil {
 			return fmt.Errorf("reference chain: failed to download tx %s: %w", txID, err)
 		}
 
-		// 计算下载数据的 CID
+		// 2. 计算下载数据的 CID
 		computedCID, err := computeCIDv1(data)
 		if err != nil {
 			return fmt.Errorf("reference chain: failed to compute CID for tx %s: %w", txID, err)
@@ -418,9 +445,41 @@ func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 		if !matched {
 			return fmt.Errorf("reference chain: tx %s data CID %s does not match any expected CID in reference", txID, computedCID)
 		}
+
+		// 3. 检查被引用交易是否也是元数据 JSON（含 reference 字段）
+		subMeta, err := tryParseMetadata(data)
+		if err != nil {
+			// 不是元数据 JSON，无法递归，该分支结束
+			continue
+		}
+
+		// 4. 如果被引用交易也有 reference 字段，递归解析
+		if subMeta.HasReference() {
+			if err := p.resolveReferences(ctx, *subMeta.Reference, visited, depth+1); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
+}
+
+// tryParseMetadata 尝试将数据解析为 Metadata JSON。
+// 如果不是合法的 IPFAR 元数据，返回 error。
+func tryParseMetadata(data []byte) (*metadata.Metadata, error) {
+	// 尝试直接 JSON 解析
+	var meta metadata.Metadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("not metadata JSON: %w", err)
+	}
+	// 基本校验：必须有 version 字段为 1
+	if meta.Version != 1 {
+		return nil, fmt.Errorf("not metadata JSON: invalid version %d", meta.Version)
+	}
+	if meta.RootCID == "" {
+		return nil, fmt.Errorf("not metadata JSON: missing root_cid")
+	}
+	return &meta, nil
 }
 
 // defaultIntegrityVerifier 默认数据完整性验证器（无 CAR 文件时跳过）

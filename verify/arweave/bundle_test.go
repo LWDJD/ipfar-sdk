@@ -326,3 +326,111 @@ func downloadBundle(txID string) (*os.File, error) {
 
 	return nil, fmt.Errorf("All gateways failed, last error: %v", lastErr)
 }
+
+// =============================================================================
+// ExtractBundleItemData tests
+// =============================================================================
+
+func TestExtractBundleItemData_UnitTest(t *testing.T) {
+	expectedData := []byte("hello bundle item data!")
+	item := &BundleItem{
+		Data: Base64Encode(expectedData),
+	}
+
+	data, err := ExtractBundleItemData(item)
+	if err != nil {
+		t.Fatalf("ExtractBundleItemData failed: %v", err)
+	}
+	if string(data) != string(expectedData) {
+		t.Errorf("expected %q, got %q", expectedData, data)
+	}
+}
+
+func TestExtractBundleItemData_NilItem_UnitTest(t *testing.T) {
+	_, err := ExtractBundleItemData(nil)
+	if err == nil {
+		t.Fatal("expected error for nil item")
+	}
+}
+
+func TestExtractBundleItemData_EmptyData_UnitTest(t *testing.T) {
+	item := &BundleItem{
+		Data: "",
+	}
+
+	data, err := ExtractBundleItemData(item)
+	if err != nil {
+		t.Fatalf("ExtractBundleItemData failed for empty data: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty data, got %d bytes", len(data))
+	}
+}
+
+func TestByteArrayToLong_UnitTest(t *testing.T) {
+	// Little-endian encoding: value 1 → [1, 0, 0, ...]
+	b := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+	val := ByteArrayToLong(b)
+	if val != 1 {
+		t.Errorf("expected 1, got %d", val)
+	}
+
+	// Value 256 → [0, 1, 0, 0, ...]
+	b = []byte{0, 1, 0, 0, 0, 0, 0, 0}
+	val = ByteArrayToLong(b)
+	if val != 256 {
+		t.Errorf("expected 256, got %d", val)
+	}
+}
+
+func TestBase64Encode_Decode_UnitTest(t *testing.T) {
+	original := []byte("test base64 data")
+	encoded := Base64Encode(original)
+
+	// Verify round-trip using internal base64Decode.
+	decoded, err := base64Decode(encoded)
+	if err != nil {
+		t.Fatalf("base64Decode failed: %v", err)
+	}
+	if string(decoded) != string(original) {
+		t.Errorf("roundtrip mismatch: got %q, want %q", decoded, original)
+	}
+}
+
+func TestDecodeBundleItem_UnitTest(t *testing.T) {
+	// Build minimal binary item matching ANS-104 spec.
+	sigType := []byte{1, 0} // ArweaveSignType (little-endian)
+	signature := make([]byte, 512)
+	owner := make([]byte, 512)
+	noTarget := []byte{0}
+	noAnchor := []byte{0}
+	numTags := make([]byte, 8) // 0 tags (little-endian 0)
+	tagsLen := make([]byte, 8) // 0 bytes
+	data := []byte("test-item-data")
+
+	itemBinary := append(sigType, signature...)
+	itemBinary = append(itemBinary, owner...)
+	itemBinary = append(itemBinary, noTarget...)
+	itemBinary = append(itemBinary, noAnchor...)
+	itemBinary = append(itemBinary, numTags...)
+	itemBinary = append(itemBinary, tagsLen...)
+	itemBinary = append(itemBinary, data...)
+
+	item, err := DecodeBundleItem(itemBinary)
+	if err != nil {
+		t.Fatalf("DecodeBundleItem failed: %v", err)
+	}
+
+	if item.SignatureType != ArweaveSignType {
+		t.Errorf("expected signature type %d, got %d", ArweaveSignType, item.SignatureType)
+	}
+
+	// Extract data and verify.
+	extractedData, err := ExtractBundleItemData(&item)
+	if err != nil {
+		t.Fatalf("ExtractBundleItemData failed: %v", err)
+	}
+	if string(extractedData) != string(data) {
+		t.Errorf("expected %q, got %q", data, extractedData)
+	}
+}

@@ -1,11 +1,14 @@
 package arweave
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -1049,4 +1052,476 @@ func TestBufferToInt_UnitTest(t *testing.T) {
 	if recovered != original {
 		t.Errorf("roundtrip: %d -> longTo32BytesBE -> bufferToInt -> %d", original, recovered)
 	}
+}
+
+// =============================================================================
+// DownloadTransactionToWriter tests
+// =============================================================================
+
+func TestDownloadTransactionToWriter_UnitTest(t *testing.T) {
+	expectedData := []byte("streamed transaction data here!")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/stream-tx" {
+			w.WriteHeader(http.StatusOK)
+			w.Write(expectedData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+
+	var buf bytes.Buffer
+	n, err := client.DownloadTransactionToWriter(context.Background(), "stream-tx", &buf)
+	if err != nil {
+		t.Fatalf("DownloadTransactionToWriter failed: %v", err)
+	}
+	if n != int64(len(expectedData)) {
+		t.Errorf("expected %d bytes written, got %d", len(expectedData), n)
+	}
+	if buf.String() != string(expectedData) {
+		t.Errorf("expected %q, got %q", expectedData, buf.String())
+	}
+}
+
+func TestDownloadTransactionToWriter_NotFound_UnitTest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+	var buf bytes.Buffer
+	_, err := client.DownloadTransactionToWriter(context.Background(), "no-tx", &buf)
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+	t.Logf("Got expected error: %v", err)
+}
+
+func TestDownloadTransactionToWriter_LargeData_UnitTest(t *testing.T) {
+	// Data larger than the 32KB buffer to ensure streaming works for multi-chunk reads.
+	expectedData := make([]byte, 100_000)
+	for i := range expectedData {
+		expectedData[i] = byte(i % 256)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/large-tx" {
+			w.WriteHeader(http.StatusOK)
+			w.Write(expectedData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+
+	var buf bytes.Buffer
+	n, err := client.DownloadTransactionToWriter(context.Background(), "large-tx", &buf)
+	if err != nil {
+		t.Fatalf("DownloadTransactionToWriter failed: %v", err)
+	}
+	if n != int64(len(expectedData)) {
+		t.Errorf("expected %d bytes written, got %d", len(expectedData), n)
+	}
+	if !bytes.Equal(buf.Bytes(), expectedData) {
+		t.Error("data mismatch for large transaction")
+	}
+}
+
+// =============================================================================
+// DownloadTransactionRange tests
+// =============================================================================
+
+func TestDownloadTransactionRange_UnitTest(t *testing.T) {
+	fullData := []byte("0123456789ABCDEFGHIJ")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/range-tx" {
+			rangeHeader := r.Header.Get("Range")
+			if rangeHeader != "" {
+				// Parse simple range like "bytes=5-9"
+				var start, end int64
+				fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end)
+				if start >= 0 && end < int64(len(fullData)) && start <= end {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(fullData)))
+					w.WriteHeader(http.StatusPartialContent)
+					w.Write(fullData[start : end+1])
+					return
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(fullData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+
+	// Fetch a middle range.
+	data, err := client.DownloadTransactionRange(context.Background(), "range-tx", 5, 10)
+	if err != nil {
+		t.Fatalf("DownloadTransactionRange failed: %v", err)
+	}
+	expected := fullData[5:15]
+	if !bytes.Equal(data, expected) {
+		t.Errorf("expected %q, got %q", expected, data)
+	}
+}
+
+func TestDownloadTransactionRange_FullResponse_UnitTest(t *testing.T) {
+	// Some gateways return 200 OK even for Range requests.  We handle that.
+	fullData := []byte("hello world range test")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/full-range-tx" {
+			// Return 200 OK (ignoring Range), but only up to length bytes will be read.
+			w.WriteHeader(http.StatusOK)
+			w.Write(fullData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+
+	// Request 8 bytes from offset 3.  With a 200 OK, we read min(length, available).
+	data, err := client.DownloadTransactionRange(context.Background(), "full-range-tx", 3, 8)
+	if err != nil {
+		t.Fatalf("DownloadTransactionRange failed: %v", err)
+	}
+	if !bytes.Equal(data, fullData[3:11]) {
+		t.Errorf("expected %q, got %q", fullData[3:11], data)
+	}
+}
+
+func TestDownloadTransactionRange_InvalidParams_UnitTest(t *testing.T) {
+	client := NewGatewayClient("https://example.com")
+
+	_, err := client.DownloadTransactionRange(context.Background(), "tx", -1, 10)
+	if err == nil {
+		t.Fatal("expected error for negative offset")
+	}
+
+	_, err = client.DownloadTransactionRange(context.Background(), "tx", 0, 0)
+	if err == nil {
+		t.Fatal("expected error for zero length")
+	}
+
+	_, err = client.DownloadTransactionRange(context.Background(), "tx", 0, -5)
+	if err == nil {
+		t.Fatal("expected error for negative length")
+	}
+}
+
+// =============================================================================
+// MultiGatewayClient tests
+// =============================================================================
+
+func TestMultiGatewayClient_Do_Failover_UnitTest(t *testing.T) {
+	callCount := 0
+	expectedData := []byte("fallback-data")
+
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError) // primary fails
+	}))
+	defer server1.Close()
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method == "GET" && r.URL.Path == "/test-tx" {
+			w.WriteHeader(http.StatusOK)
+			w.Write(expectedData)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server2.Close()
+
+	mg := NewMultiGatewayClient(server1.URL, server2.URL)
+
+	// Use DownloadTransactionData which properly returns errors on HTTP failures.
+	data, err := mg.DownloadTransactionData(context.Background(), "test-tx")
+	if err != nil {
+		t.Fatalf("DownloadTransactionData should succeed via fallback: %v", err)
+	}
+	if !bytes.Equal(data, expectedData) {
+		t.Errorf("expected %q, got %q", expectedData, data)
+	}
+	// callCount should be >= 2 (server1 failed, server2 succeeded).
+	if callCount < 2 {
+		t.Errorf("expected at least 2 calls (failover), got %d", callCount)
+	}
+	t.Logf("Failover succeeded after %d calls", callCount)
+}
+
+func TestMultiGatewayClient_Do_AllFail_UnitTest(t *testing.T) {
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server1.Close()
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server2.Close()
+
+	mg := NewMultiGatewayClient(server1.URL, server2.URL)
+
+	// Use DownloadTransactionData which properly returns errors on HTTP failures.
+	_, err := mg.DownloadTransactionData(context.Background(), "test-tx")
+	if err == nil {
+		t.Fatal("expected error when all gateways fail")
+	}
+	t.Logf("All-gateways-fail error: %v", err)
+}
+
+func TestMultiGatewayClient_Do_FirstSuccess_UnitTest(t *testing.T) {
+	callCount := 0
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.URL.Path == "/tx/test-tx/status" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"block_height":42,"block_indep_hash":"first"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server1.Close()
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server2.Close()
+
+	mg := NewMultiGatewayClient(server1.URL, server2.URL)
+
+	status, err := mg.GetTransactionStatus(context.Background(), "test-tx")
+	if err != nil {
+		t.Fatalf("GetTransactionStatus failed: %v", err)
+	}
+	if status.BlockHeight != 42 {
+		t.Errorf("expected block 42, got %d", status.BlockHeight)
+	}
+	// Should succeed on first gateway, so only 1 call.
+	if callCount != 1 {
+		t.Errorf("expected 1 call (first succeeds), got %d", callCount)
+	}
+}
+
+func TestMultiGatewayClient_EmptyGateways_UnitTest(t *testing.T) {
+	mg := NewMultiGatewayClient()
+	err := mg.Do(context.Background(), func(gw *GatewayClient) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error for empty gateways")
+	}
+}
+
+func TestMultiGatewayClient_ContextCancel_UnitTest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"block_height":1,"block_indep_hash":"h"}`))
+	}))
+	defer server.Close()
+
+	mg := NewMultiGatewayClient(server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := mg.GetTransactionStatus(ctx, "tx")
+	if err == nil {
+		t.Fatal("expected context.Canceled error")
+	}
+}
+
+func TestMultiGatewayClient_AllMethods_UnitTest(t *testing.T) {
+	// Verify all wrapped methods compile and run without panic.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/graphql" && r.Method == "POST":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":{"transactions":{"edges":[]}}}`))
+		case r.URL.Path == "/tx/test-tx/status":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"block_height":10,"block_indep_hash":"hash"}`))
+		case r.URL.Path == "/tx/test-tx":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data_size":"1024"}`))
+		case r.URL.Path == "/test-tx":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("hello download"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mg := NewMultiGatewayClient(server.URL)
+
+	// GetTransactionStatus
+	status, err := mg.GetTransactionStatus(context.Background(), "test-tx")
+	if err != nil {
+		t.Fatalf("GetTransactionStatus: %v", err)
+	}
+	if status.BlockHeight != 10 {
+		t.Errorf("unexpected block height: %d", status.BlockHeight)
+	}
+
+	// GetTransactionDataSize
+	size, err := mg.GetTransactionDataSize(context.Background(), "test-tx")
+	if err != nil {
+		t.Fatalf("GetTransactionDataSize: %v", err)
+	}
+	if size != 1024 {
+		t.Errorf("expected size 1024, got %d", size)
+	}
+
+	// DownloadTransactionData
+	data, err := mg.DownloadTransactionData(context.Background(), "test-tx")
+	if err != nil {
+		t.Fatalf("DownloadTransactionData: %v", err)
+	}
+	if string(data) != "hello download" {
+		t.Errorf("unexpected data: %q", data)
+	}
+
+	// DownloadTransactionToWriter
+	var buf bytes.Buffer
+	n, err := mg.DownloadTransactionToWriter(context.Background(), "test-tx", &buf)
+	if err != nil {
+		t.Fatalf("DownloadTransactionToWriter: %v", err)
+	}
+	if n != int64(len("hello download")) {
+		t.Errorf("expected %d bytes, got %d", len("hello download"), n)
+	}
+
+	// DownloadTransactionRange
+	rangeData, err := mg.DownloadTransactionRange(context.Background(), "test-tx", 0, 5)
+	if err != nil {
+		t.Fatalf("DownloadTransactionRange: %v", err)
+	}
+	if string(rangeData) != "hello" {
+		t.Errorf("expected 'hello', got %q", rangeData)
+	}
+
+	// QueryExistingCARs
+	ids, err := mg.QueryExistingCARs(context.Background(), "bafyTest", 5)
+	if err != nil {
+		t.Fatalf("QueryExistingCARs: %v", err)
+	}
+	if ids == nil {
+		t.Fatal("expected non-nil IDs slice")
+	}
+
+	// QueryExistingMetas
+	ids, err = mg.QueryExistingMetas(context.Background(), "bafyTest", "data-tx", 5)
+	if err != nil {
+		t.Fatalf("QueryExistingMetas: %v", err)
+	}
+	if ids == nil {
+		t.Fatal("expected non-nil IDs slice")
+	}
+}
+
+// =============================================================================
+// FetchBundleItemByID test (mock)
+// =============================================================================
+
+func TestFetchBundleItemByID_UnitTest(t *testing.T) {
+	// Build a minimal bundle with 1 item and serve it.
+	// We need the verify/arweave package to build the binary bundle.
+	// Instead, we use a pre-built simple binary bundle.
+	// Bundle format:
+	//   bytes 0-31: item count (little-endian) = 1
+	//   bytes 32-63: item length (little-endian)
+	//   bytes 64-95: item ID (32 bytes)
+	//   bytes 96+: item binary data
+
+	// Create a simple item with known structure.
+	// SignatureType=1 (2 bytes little-endian), sig(512 bytes), owner(512 bytes),
+	// target present(0), anchor present(0), numTags(8 bytes)=0, tagsBytesLen(8 bytes)=0,
+	// data.
+	sigType := []byte{1, 0} // type 1 (Arweave)
+	signature := make([]byte, 512)
+	owner := make([]byte, 512)
+	noTarget := []byte{0}
+	noAnchor := []byte{0}
+	numTags := make([]byte, 8) // 0 tags
+	tagsLen := make([]byte, 8) // 0 bytes
+	itemData := []byte("my-bundle-item-data")
+
+	// Compute ID from signature.
+	idHash := sha256.Sum256(signature)
+	itemID := idHash[:] // 32 bytes
+
+	itemBinary := append(sigType, signature...)
+	itemBinary = append(itemBinary, owner...)
+	itemBinary = append(itemBinary, noTarget...)
+	itemBinary = append(itemBinary, noAnchor...)
+	itemBinary = append(itemBinary, numTags...)
+	itemBinary = append(itemBinary, tagsLen...)
+	itemBinary = append(itemBinary, itemData...)
+
+	itemLen := len(itemBinary)
+	itemLenBytes := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		itemLenBytes[i] = byte(itemLen >> (8 * i))
+	}
+
+	// Build header
+	itemsNumBytes := make([]byte, 32)
+	itemsNumBytes[0] = 1 // 1 item
+
+	header := append(itemsNumBytes, itemLenBytes...)
+	header = append(header, itemID...)
+
+	bundleBinary := append(header, itemBinary...)
+	itemIDBase64 := base64.RawURLEncoding.EncodeToString(itemID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rangeHeader := r.Header.Get("Range")
+		switch {
+		case rangeHeader == "bytes=0-31":
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-31/%d", len(bundleBinary)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(bundleBinary[:32])
+		case rangeHeader == fmt.Sprintf("bytes=0-%d", 32+1*64-1):
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", 32+1*64-1, len(bundleBinary)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(bundleBinary[:32+1*64])
+		default:
+			// Parse the range for item fetch
+			var start, end int64
+			fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end)
+			if start >= 0 && end < int64(len(bundleBinary)) {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(bundleBinary)))
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write(bundleBinary[start : end+1])
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(bundleBinary)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL)
+
+	data, err := client.FetchBundleItemByID(context.Background(), "bundle-tx", itemIDBase64)
+	if err != nil {
+		t.Fatalf("FetchBundleItemByID failed: %v", err)
+	}
+	if string(data) != string(itemData) {
+		t.Errorf("expected %q, got %q", itemData, data)
+	}
+	t.Logf("Fetched bundle item data: %q", data)
 }

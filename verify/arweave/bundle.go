@@ -1078,6 +1078,38 @@ func tryFetchItemTags(url string, itemIndex int, meta ItemMeta) ([]Tag, error) {
 	return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 }
 
+// =============================================================================
+// Exported helpers for cross-package use
+// =============================================================================
+
+// ByteArrayToLong converts a byte slice to an integer (little-endian).
+// This is the exported version of byteArrayToLong for use by other packages.
+func ByteArrayToLong(b []byte) int {
+	return byteArrayToLong(b)
+}
+
+// Base64Encode encodes data to base64url without padding.
+// This is the exported version of base64Encode for use by other packages.
+func Base64Encode(data []byte) string {
+	return base64Encode(data)
+}
+
+// DecodeBundleItem decodes binary ANS-104 data into a BundleItem.
+// This is the exported version of decodeBundleItem for use by other packages.
+func DecodeBundleItem(itemBinary []byte) (BundleItem, error) {
+	return decodeBundleItem(itemBinary)
+}
+
+// ExtractBundleItemData extracts the original data payload from a bundle item.
+// The BundleItem.Data field is base64url-encoded; this function decodes it
+// and returns the raw bytes.
+func ExtractBundleItemData(item *BundleItem) ([]byte, error) {
+	if item == nil {
+		return nil, errors.New("item is nil")
+	}
+	return base64Decode(item.Data)
+}
+
 // parseTagsFromItemData 从数据项的二进制数据中解析标签
 // 根据 ANS-104 规范解析签名类型、可选字段（target/anchor）和 Avro 编码的标签
 // 如果初始数据不完整，会使用额外的 HTTP Range 请求获取缺失数据

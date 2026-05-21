@@ -305,9 +305,11 @@ func TestValidate_NegativeDataHeight(t *testing.T) {
 
 func TestValidate_NegativeOneDataHeight(t *testing.T) {
 	meta := validMeta()
-	meta.DataHeight = -1 // -1 表示同 Bundle，应允许
+	meta.Method = MethodBundle
+	meta.DataHeight = -1     // -1 表示同 Bundle
+	meta.BundleTXID = "none" // 规范 §2.2：data_height=-1 时 bundle_txid 必须为 "none"
 	if err := meta.Validate(); err != nil {
-		t.Errorf("data_height = -1 should be valid, got: %v", err)
+		t.Errorf("data_height = -1 with bundle_txid='none' should be valid, got: %v", err)
 	}
 }
 
