@@ -186,11 +186,14 @@ func (mc *MemoryCache) Delete(key string) error {
 func (mc *MemoryCache) Clear() error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	return mc.clearLocked()
+}
 
+// clearLocked clears all entries without acquiring the mutex.
+func (mc *MemoryCache) clearLocked() error {
 	if mc.closed {
 		return fmt.Errorf("cache is closed")
 	}
-
 	mc.items = make(map[string]*list.Element)
 	mc.lru.Init()
 	mc.size = 0
@@ -206,7 +209,7 @@ func (mc *MemoryCache) Close() error {
 		return nil
 	}
 
-	_ = mc.Clear()
+	_ = mc.clearLocked()
 	mc.closed = true
 	return nil
 }
