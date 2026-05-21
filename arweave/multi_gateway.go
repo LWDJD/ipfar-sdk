@@ -173,6 +173,39 @@ func (m *MultiGatewayClient) QueryExistingMetas(ctx context.Context, rootCID, da
 	return result, err
 }
 
+// RunGraphQL executes a GraphQL query across all gateways.
+func (m *MultiGatewayClient) RunGraphQL(ctx context.Context, query *GraphQLQuery) ([]string, error) {
+	var result []string
+	err := m.Do(ctx, func(gw *GatewayClient) error {
+		var e error
+		result, e = gw.RunGraphQL(ctx, query)
+		return e
+	})
+	return result, err
+}
+
+// EstimateFee estimates the upload fee across all gateways.
+func (m *MultiGatewayClient) EstimateFee(ctx context.Context, dataSize int64) (*FeeEstimate, error) {
+	var result *FeeEstimate
+	err := m.Do(ctx, func(gw *GatewayClient) error {
+		var e error
+		result, e = gw.EstimateFee(ctx, dataSize)
+		return e
+	})
+	return result, err
+}
+
+// EstimateUploadFee estimates the total upload fee across all gateways.
+func (m *MultiGatewayClient) EstimateUploadFee(ctx context.Context, fileSize int64) (*FeeEstimate, error) {
+	var result *FeeEstimate
+	err := m.Do(ctx, func(gw *GatewayClient) error {
+		var e error
+		result, e = gw.EstimateUploadFee(ctx, fileSize)
+		return e
+	})
+	return result, err
+}
+
 // FetchBundleItemByID fetches a bundle item by ID across all gateways.
 func (m *MultiGatewayClient) FetchBundleItemByID(ctx context.Context, bundleTXID, itemID string) ([]byte, error) {
 	var result []byte
