@@ -183,6 +183,16 @@ func (m *Metadata) NeedsPoW() bool {
 	return int64(m.DataSize) < PoWThreshold
 }
 
+// IsCrossBundle 判断是否为跨 Bundle 模式（method=bundle 且 data 在另一个 Bundle 中）
+func (m *Metadata) IsCrossBundle() bool {
+	return m.Method == MethodBundle && m.DataHeight >= 0 && m.BundleTXID != ""
+}
+
+// IsSameBundle 判断是否为同 Bundle 模式（method=bundle 且 data 在同一 Bundle 中）
+func (m *Metadata) IsSameBundle() bool {
+	return m.Method == MethodBundle && m.DataHeight == -1 && m.BundleTXID == "none"
+}
+
 // HasReference 判断是否包含引用
 func (m *Metadata) HasReference() bool {
 	return m.Reference != nil && len(*m.Reference) > 0

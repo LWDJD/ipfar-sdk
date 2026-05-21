@@ -3,6 +3,7 @@ package arweave
 import (
 	"context"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -25,6 +26,22 @@ func NewMultiGatewayClient(urls ...string) *MultiGatewayClient {
 	return &MultiGatewayClient{
 		gateways: gateways,
 		current:  0,
+	}
+}
+
+// SetHTTPClient sets a custom HTTP client on all underlying gateway clients.
+// This allows injecting proxy-configured clients for bridge-specific features
+// like SOCKS5 support.
+func (m *MultiGatewayClient) SetHTTPClient(c *http.Client) {
+	for _, gw := range m.gateways {
+		gw.SetHTTPClient(c)
+	}
+}
+
+// SetUserAgent sets the User-Agent header on all underlying gateway clients.
+func (m *MultiGatewayClient) SetUserAgent(ua string) {
+	for _, gw := range m.gateways {
+		gw.SetUserAgent(ua)
 	}
 }
 

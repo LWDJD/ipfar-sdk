@@ -27,11 +27,12 @@ const (
 
 // 验证步骤标识
 const (
-	StepMetaValidate   = "meta_validate"   // 元数据合法性校验（强制）
-	StepPoW            = "pow"             // PoW 验证
-	StepIndex          = "index"           // CAR v2 Index 完整性
-	StepReferenceChain = "reference_chain" // 引用链验证
-	StepIntegrity      = "integrity"       // 数据完整性验证
+	StepMetaValidate    = "meta_validate"    // 元数据合法性校验（强制）
+	StepPoW             = "pow"              // PoW 验证
+	StepIndexExistence  = "index_existence"  // CAR v2 Index 存在性检查（强制，不可配置）
+	StepIndex           = "index"            // CAR v2 Index 完整性
+	StepReferenceChain  = "reference_chain"  // 引用链验证
+	StepIntegrity       = "integrity"        // 数据完整性验证
 )
 
 // VerifyConfig 验证配置
@@ -119,11 +120,12 @@ type Pipeline struct {
 	config VerifyConfig
 
 	// 可注入的验证函数（用于测试）
-	metaValidator     func(meta *metadata.Metadata) error
-	powVerifier       func(powStr, powAlg, rootCID, dataTXID string, dataSize int64) error
-	indexVerifier     func() error
-	referenceVerifier func(meta *metadata.Metadata) error
-	integrityVerifier func() error
+	metaValidator        func(meta *metadata.Metadata) error
+	powVerifier          func(powStr, powAlg, rootCID, dataTXID string, dataSize int64) error
+	indexExistenceVerifier func() error
+	indexVerifier        func() error
+	referenceVerifier    func(meta *metadata.Metadata) error
+	integrityVerifier    func() error
 
 	// CAR 文件解析器（可选，用于 Index 和 Integrity 验证）
 	carFile string // CAR 文件路径
@@ -140,6 +142,7 @@ func NewPipeline(config VerifyConfig) *Pipeline {
 	// 默认使用标准实现
 	p.metaValidator = defaultMetaValidator
 	p.powVerifier = defaultPoWVerifier
+	p.indexExistenceVerifier = defaultIndexExistenceVerifier
 	p.indexVerifier = defaultIndexVerifier
 	p.referenceVerifier = p.defaultReferenceVerifier
 	p.integrityVerifier = defaultIntegrityVerifier
@@ -152,6 +155,9 @@ func NewPipeline(config VerifyConfig) *Pipeline {
 func (p *Pipeline) SetCarFile(carPath string) {
 	p.carFile = carPath
 	// 使用基于 CAR 文件的默认实现替换占位实现
+	p.indexExistenceVerifier = func() error {
+		return defaultIndexExistenceVerifierWithCar(carPath)
+	}
 	p.indexVerifier = func() error {
 		return defaultIndexVerifierWithCar(carPath)
 	}
@@ -187,6 +193,11 @@ func (p *Pipeline) SetPoWVerifier(fn func(powStr, powAlg, rootCID, dataTXID stri
 // SetIndexVerifier 注入自定义 Index 验证器（用于测试）
 func (p *Pipeline) SetIndexVerifier(fn func() error) {
 	p.indexVerifier = fn
+}
+
+// SetIndexExistenceVerifier 注入自定义 Index 存在性验证器（用于测试）
+func (p *Pipeline) SetIndexExistenceVerifier(fn func() error) {
+	p.indexExistenceVerifier = fn
 }
 
 // SetReferenceVerifier 注入自定义引用验证器（用于测试）
@@ -248,7 +259,7 @@ func (p *Pipeline) Verify(meta *metadata.Metadata, carAvailable bool) *PipelineR
 	// 后续步骤需要 CAR 文件
 	if !carAvailable {
 		// CAR 文件不可用，跳过后续验证
-		skippedSteps := []string{StepIndex, StepReferenceChain, StepIntegrity}
+		skippedSteps := []string{StepIndexExistence, StepIndex, StepReferenceChain, StepIntegrity}
 		for _, step := range skippedSteps {
 			result.Results = append(result.Results, VerifyResult{
 				Step:    step,
@@ -260,7 +271,19 @@ func (p *Pipeline) Verify(meta *metadata.Metadata, carAvailable bool) *PipelineR
 		return result
 	}
 
-	// Step 3: CAR v2 Index 完整性
+	// Step 3a: Index 存在性检查（始终强制执行，规范 §3.4）
+	// 仅检查 CARv2 是否包含 Index，不校验内容。
+	// 此步骤不可配置，对所有安全等级（包括 trusted）均执行。
+	vr = p.executeStep(StepIndexExistence, true, func() error {
+		return p.indexExistenceVerifier()
+	})
+	result.Results = append(result.Results, vr)
+	if !vr.Passed && !vr.Skipped {
+		result.Passed = false
+	}
+
+	// Step 3b: Index 内容校验（可配置）
+	// 当 verify_index=true 时，验证索引内容完整性及交叉校验。
 	vr = p.executeStep(StepIndex, p.config.VerifyIndex, func() error {
 		return p.indexVerifier()
 	})
@@ -332,6 +355,27 @@ func defaultMetaValidator(meta *metadata.Metadata) error {
 // defaultPoWVerifier 默认 PoW 验证器
 func defaultPoWVerifier(powStr, powAlg, rootCID, dataTXID string, dataSize int64) error {
 	return pow.Verify(powStr, powAlg, rootCID, dataTXID, dataSize)
+}
+
+// defaultIndexExistenceVerifier 默认 Index 存在性验证器（无 CAR 文件时跳过）
+func defaultIndexExistenceVerifier() error {
+	// 占位：无 CAR 文件可用时跳过
+	return nil
+}
+
+// defaultIndexExistenceVerifierWithCar 基于 CAR 文件的 Index 存在性检查
+// 仅检查 CARv2 是否包含 Index，不校验内容。规范 §3.4。
+func defaultIndexExistenceVerifierWithCar(carPath string) error {
+	if carPath == "" {
+		return nil
+	}
+	parser, err := ipfs.NewCarParserFromFile(carPath)
+	if err != nil {
+		return fmt.Errorf("failed to open CAR file for index existence check: %v", err)
+	}
+	defer parser.Close()
+
+	return parser.ValidateIndexExistence()
 }
 
 // defaultIndexVerifier 默认 Index 验证器（无 CAR 文件时跳过）

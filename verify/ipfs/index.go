@@ -220,6 +220,29 @@ func (p *CarParser) readVarint(data []byte) (uint64, int, error) {
 	return value, n, nil
 }
 
+// ValidateIndexExistence 检查 CARv2 文件是否包含索引（仅存在性检查，不校验内容）
+//
+// 规范 §3.4：Index 存在性检查始终强制执行，不受 verify_index 配置影响。
+// 对于 CARv1 文件，始终返回 nil（CARv1 不需要索引）。
+// 对于 CARv2 文件，若缺少索引则返回 ErrIndexNotFound。
+func (p *CarParser) ValidateIndexExistence() error {
+	info, err := p.ParseInfo()
+	if err != nil {
+		return err
+	}
+
+	// CARv1 不需要索引
+	if info.Version != 2 {
+		return nil
+	}
+
+	if !info.HasIndex {
+		return ErrIndexNotFound
+	}
+
+	return nil
+}
+
 // ValidateIndexContent 验证索引内容的完整性
 //
 // 检查:
