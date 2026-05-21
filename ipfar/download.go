@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
+	"github.com/LWDJD/ipfar-sdk/log"
 	sdkcar "github.com/LWDJD/ipfar-sdk/verify/ipfs"
 	sdkmeta "github.com/LWDJD/ipfar-sdk/verify/metadata"
 	"github.com/ipfs/go-cid"
@@ -110,8 +110,7 @@ func tryParseMetadata(rawData []byte) (*sdkmeta.Metadata, error) {
 
 	meta, err = sdkmeta.ParseJSON(decoded)
 	if err == nil {
-		msg := "Warning: metadata uses legacy base64 format, consider re-uploading as raw JSON\n"
-		os.Stderr.WriteString(msg)
+		log.Warn(context.Background(), "metadata uses legacy base64 format, consider re-uploading as raw JSON")
 	}
 	return meta, err
 }
