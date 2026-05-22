@@ -10,11 +10,13 @@ import (
 
 // GraphQLQuery builds Arweave GraphQL queries for transactions.
 // Use NewGraphQLQuery to create a new builder, then chain methods to
-// configure tag filters, result limits, and sort order.
+// configure tag filters, result limits, block height filters, and sort order.
 type GraphQLQuery struct {
 	tagFilters []tagFilter
 	first      int
 	sort       string // "HEIGHT_DESC" or "HEIGHT_ASC"
+	blockMin   int    // minimum block height filter (-1 = unset)
+	blockMax   int    // maximum block height filter (-1 = unset)
 }
 
 // tagFilter represents a single tag condition: name AND any of the values (OR).
@@ -27,8 +29,10 @@ type tagFilter struct {
 // (first=10, sort=HEIGHT_DESC).
 func NewGraphQLQuery() *GraphQLQuery {
 	return &GraphQLQuery{
-		first: 10,
-		sort:  "HEIGHT_DESC",
+		first:    10,
+		sort:     "HEIGHT_DESC",
+		blockMin: -1,
+		blockMax: -1,
 	}
 }
 
@@ -50,6 +54,14 @@ func (q *GraphQLQuery) SetFirst(n int) *GraphQLQuery {
 // and "HEIGHT_ASC".
 func (q *GraphQLQuery) SetSort(order string) *GraphQLQuery {
 	q.sort = order
+	return q
+}
+
+// SetBlockRange sets block height filter (min and max, both inclusive).
+// Use -1 to unset either bound.  For a single block, set min == max.
+func (q *GraphQLQuery) SetBlockRange(minHeight, maxHeight int) *GraphQLQuery {
+	q.blockMin = minHeight
+	q.blockMax = maxHeight
 	return q
 }
 
@@ -77,6 +89,21 @@ func (q *GraphQLQuery) Build() string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\t\t\t],\n")
+	}
+
+	// Block height filter
+	if q.blockMin >= 0 || q.blockMax >= 0 {
+		sb.WriteString("\t\t\tblock: {")
+		if q.blockMin >= 0 {
+			sb.WriteString(fmt.Sprintf("min: %d", q.blockMin))
+		}
+		if q.blockMin >= 0 && q.blockMax >= 0 {
+			sb.WriteString(", ")
+		}
+		if q.blockMax >= 0 {
+			sb.WriteString(fmt.Sprintf("max: %d", q.blockMax))
+		}
+		sb.WriteString("},\n")
 	}
 
 	if q.first > 0 {

@@ -467,9 +467,24 @@ func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.Reference
 		visited[txID] = true
 
 		// 1. 下载被引用的交易数据
-		data, err := p.gatewayClient.DownloadTransactionData(ctx, txID)
-		if err != nil {
-			return fmt.Errorf("reference chain: failed to download tx %s: %w", txID, err)
+		// 根据引用条目中的 bundle_txid 决定下载方式：
+		//   - bundle_txid 非空且不为 "none"：跨 Bundle 引用，通过 Bundle Item API 获取
+		//   - 其他情况：直接下载交易数据
+		var data []byte
+		var err error
+
+		if entry.BundleTXID != "" && entry.BundleTXID != "none" {
+			// 跨 Bundle 引用：通过 Bundle Item API 获取
+			data, err = p.gatewayClient.FetchBundleItemByID(ctx, entry.BundleTXID, txID)
+			if err != nil {
+				return fmt.Errorf("reference chain: failed to fetch bundle item %s from bundle %s: %w", txID, entry.BundleTXID, err)
+			}
+		} else {
+			// 常规引用（同 Bundle 或同块）：直接下载交易数据
+			data, err = p.gatewayClient.DownloadTransactionData(ctx, txID)
+			if err != nil {
+				return fmt.Errorf("reference chain: failed to download tx %s: %w", txID, err)
+			}
 		}
 
 		// 2. 计算下载数据的 CID
