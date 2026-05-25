@@ -233,3 +233,22 @@ func (m *MultiGatewayClient) FetchBundleItemByID(ctx context.Context, bundleTXID
 	})
 	return result, err
 }
+
+// GetNetworkInfo retrieves network information across all gateways.
+func (m *MultiGatewayClient) GetNetworkInfo(ctx context.Context) (*NetworkInfo, error) {
+	var result *NetworkInfo
+	err := m.Do(ctx, func(gw *GatewayClient) error {
+		var e error
+		result, e = gw.GetNetworkInfo(ctx)
+		return e
+	})
+	return result, err
+}
+
+// CheckHealth checks the health of all gateways by calling GET /info.
+// Returns the first successful gateway's health check or the last error.
+func (m *MultiGatewayClient) CheckHealth(ctx context.Context) error {
+	return m.Do(ctx, func(gw *GatewayClient) error {
+		return gw.CheckHealth(ctx)
+	})
+}
