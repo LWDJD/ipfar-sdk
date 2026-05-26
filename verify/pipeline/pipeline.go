@@ -173,12 +173,6 @@ func (p *Pipeline) SetGatewayClient(client *arweave.GatewayClient) {
 	p.gatewayClient = client
 }
 
-// VerifyReferenceChain 独立执行引用链验证（供外部调用）
-// 用于在线验证等不需要完整 pipeline 的场景。
-func (p *Pipeline) VerifyReferenceChain(meta *metadata.Metadata) error {
-	return p.referenceVerifier(meta)
-}
-
 // NewPipelineWithPreset 从预设创建验证管道
 func NewPipelineWithPreset(preset string) (*Pipeline, error) {
 	config, err := GetPreset(preset)
@@ -216,6 +210,38 @@ func (p *Pipeline) SetReferenceVerifier(fn func(meta *metadata.Metadata) error) 
 // SetIntegrityVerifier 注入自定义完整性验证器（用于测试）
 func (p *Pipeline) SetIntegrityVerifier(fn func() error) {
 	p.integrityVerifier = fn
+}
+
+// VerifyReferenceChain 单独执行引用链验证
+func (p *Pipeline) VerifyReferenceChain(meta *metadata.Metadata) (*VerifyResult, error) {
+	if meta == nil {
+		return &VerifyResult{
+			Step:       StepReferenceChain,
+			Passed:     false,
+			Incomplete: true,
+			Error:      "metadata is nil",
+		}, fmt.Errorf("metadata is nil")
+	}
+	if !meta.HasReference() {
+		return &VerifyResult{
+			Step:    StepReferenceChain,
+			Passed:  true,
+			Skipped: true,
+			Message: "no reference chain",
+		}, nil
+	}
+	err := p.referenceVerifier(meta)
+	if err != nil {
+		return &VerifyResult{
+			Step:   StepReferenceChain,
+			Passed: false,
+			Error:  err.Error(),
+		}, err
+	}
+	return &VerifyResult{
+		Step:   StepReferenceChain,
+		Passed: true,
+	}, nil
 }
 
 // Verify 执行验证管道
