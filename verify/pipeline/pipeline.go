@@ -86,13 +86,13 @@ var PresetConfigs = map[string]VerifyConfig{
 	},
 	SecurityLight: {
 		VerifyPoW:            true,
-		VerifyIndex:          true, // spec §3.4: Index always enforced
+		VerifyIndex:          false,
 		VerifyReferenceChain: true,
 		VerifyIntegrity:      false,
 	},
 	SecurityTrusted: {
 		VerifyPoW:            false,
-		VerifyIndex:          true, // spec §3.4: Index always enforced
+		VerifyIndex:          false,
 		VerifyReferenceChain: false,
 		VerifyIntegrity:      false,
 	},

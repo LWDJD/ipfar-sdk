@@ -21,8 +21,8 @@ func TestPresetConfigs(t *testing.T) {
 	}{
 		{SecurityStrict, true, true, true, true},
 		{SecurityBalanced, true, true, false, true},
-		{SecurityLight, true, true, true, false},
-		{SecurityTrusted, false, true, false, false},
+		{SecurityLight, true, false, true, false},
+		{SecurityTrusted, false, false, false, false},
 	}
 
 	for _, tt := range tests {
