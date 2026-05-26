@@ -43,9 +43,9 @@ var (
 // ReferenceEntry 引用条目：一个被引用的 Arweave 交易
 // 格式：{"txid": {"height": 1913001, "cids": ["cid1", "cid2"]}}
 type ReferenceEntry struct {
-	Height     int      `json:"height"`                // 区块高度，-1 表示 Bundle 模式
+	Height     int      `json:"height"`                // 区块高度（-1 表示同 Bundle）
 	CIDs       []string `json:"cids"`                  // CID 列表
-	BundleTXID string   `json:"bundle_txid,omitempty"` // Bundle TX ID（跨 Bundle 引用时）
+	BundleTXID string   `json:"bundle_txid,omitempty"` // 可选：Bundle 交易 ID（仅 bundle 模式下的引用）
 }
 
 // ReferenceMap 引用映射：key = Arweave 交易 ID，value = 引用条目
@@ -58,7 +58,7 @@ type Metadata struct {
 	Method       string         `json:"method"`                  // 必填：上传方式 "raw" / "bundle"
 	RootCID      string         `json:"root_cid"`                // 必填：根 CID（Base32）
 	DataTXID     string         `json:"data_txid"`               // 必填：主 CAR 文件 Arweave TX ID
-	DataHeight   int            `json:"data_height"`             // 必填：data_txid 所属区块高度，-1 表示 Bundle 模式
+	DataHeight   int            `json:"data_height"`             // 必填：data_txid 所属区块高度，-1 表示同 Bundle
 	DataSize     int            `json:"data_size"`               // 必填：原始数据大小（字节）
 	BundleTXID   string         `json:"bundle_txid,omitempty"`   // Bundle TX ID（跨 Bundle 时非空，"none" 表示同 Bundle）
 	Reference    *ReferenceMap  `json:"reference,omitempty"`     // 可选：引用映射（去重/分块）
@@ -137,9 +137,14 @@ func (m *Metadata) Validate() error {
 		return fmt.Errorf("%w: %q", ErrInvalidDataTXID, m.DataTXID)
 	}
 
-	// 5. data_height：必填，非负整数（-1 表示 Bundle 模式）
+	// 5. data_height：必填，非负整数（-1 表示同 Bundle）
 	if m.DataHeight < -1 {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataHeight, m.DataHeight)
+	}
+
+	// 5b. bundle_txid 约束：当 data_height = -1（同 Bundle）时，bundle_txid 必须为 "none"
+	if m.DataHeight == -1 && m.BundleTXID != "none" {
+		return fmt.Errorf("bundle_txid must be \"none\" when data_height = -1, got %q", m.BundleTXID)
 	}
 
 	// 6. data_size：必填，正整数
@@ -177,21 +182,19 @@ func (m *Metadata) NeedsPoW() bool {
 	return int64(m.DataSize) < PoWThreshold
 }
 
+// IsCrossBundle 判断是否为跨 Bundle 模式（method=bundle 且 data 在另一个 Bundle 中）
+func (m *Metadata) IsCrossBundle() bool {
+	return m.Method == MethodBundle && m.DataHeight >= 0 && m.BundleTXID != ""
+}
+
+// IsSameBundle 判断是否为同 Bundle 模式（method=bundle 且 data 在同一 Bundle 中）
+func (m *Metadata) IsSameBundle() bool {
+	return m.Method == MethodBundle && m.DataHeight == -1 && m.BundleTXID == "none"
+}
+
 // HasReference 判断是否包含引用
 func (m *Metadata) HasReference() bool {
 	return m.Reference != nil && len(*m.Reference) > 0
-}
-
-// IsCrossBundle 判断是否为跨 Bundle 模式
-// data_height = -1 且 bundle_txid 非空且不为 "none"
-func (m *Metadata) IsCrossBundle() bool {
-	return m.DataHeight == -1 && m.BundleTXID != "" && m.BundleTXID != "none"
-}
-
-// IsSameBundle 判断是否为同 Bundle 模式
-// data_height = -1 且 bundle_txid = "none"
-func (m *Metadata) IsSameBundle() bool {
-	return m.DataHeight == -1 && m.BundleTXID == "none"
 }
 
 // ToJSON 序列化为 JSON 字节数组
@@ -221,8 +224,8 @@ func validateReference(ref *ReferenceMap) error {
 			return fmt.Errorf("%w: empty transaction ID key", ErrInvalidReference)
 		}
 
-		// height 应 >= 0
-		if entry.Height < 0 {
+		// height 应 >= 0（-1 表示同 Bundle）
+		if entry.Height < -1 {
 			return fmt.Errorf("%w: negative height %d for txid %q", ErrInvalidReference, entry.Height, txid)
 		}
 
@@ -485,4 +488,121 @@ func BuildCARTags(rootCID string, dataSize int64) []Tag {
 // CleanCID 清理 CID 字符串（去除多余空格和引号）
 func CleanCID(cid string) string {
 	return strings.Trim(strings.TrimSpace(cid), "\"")
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Reference 格式转换
+// ──────────────────────────────────────────────────────────────────────
+
+// ReferenceToLocal converts a ReferenceMap (transmission format: txid→{height, cids})
+// to local lookup format: cid→txid.
+//
+// This is useful for random-access scenarios where you have a CID and need
+// to quickly find which Arweave transaction contains it.
+//
+// Transmission format (规范 §4.5):
+//
+//	{
+//	  "txid_A": {"height": 1913001, "cids": ["cid1", "cid2"]},
+//	  "txid_B": {"height": 1913002, "cids": ["cid3"]}
+//	}
+//
+// Local format:
+//
+//	{
+//	  "cid1": "txid_A",
+//	  "cid2": "txid_A",
+//	  "cid3": "txid_B"
+//	}
+func ReferenceToLocal(ref ReferenceMap) map[string]string {
+	result := make(map[string]string)
+	for txid, entry := range ref {
+		for _, cid := range entry.CIDs {
+			result[cid] = txid
+		}
+	}
+	return result
+}
+
+// LocalToReference converts local format (cid→txid) back to transmission format
+// (ReferenceMap: txid→{height, cids}).
+//
+// Note: height information is not preserved in the local format,
+// so all heights will be set to 0 in the returned ReferenceMap.
+func LocalToReference(local map[string]string) ReferenceMap {
+	ref := make(ReferenceMap)
+	for cid, txid := range local {
+		if _, ok := ref[txid]; !ok {
+			ref[txid] = ReferenceEntry{CIDs: []string{}}
+		}
+		entry := ref[txid]
+		entry.CIDs = append(entry.CIDs, cid)
+		ref[txid] = entry
+	}
+	return ref
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// BuildMetaJSON — 构建元数据 JSON（无 base64 包装）
+// ──────────────────────────────────────────────────────────────────────
+
+// MetaOptions holds optional fields for building metadata JSON.
+type MetaOptions struct {
+	Method       string        // "raw" or "bundle" (default "raw")
+	ContentType  string        // MIME type
+	OriginalName string        // original filename
+	PoW          string        // PoW salt (if applicable)
+	PoWAlg       string        // PoW algorithm
+	BundleTXID   string        // bundle txid (if bundle)
+	Reference    *ReferenceMap // optional reference map
+}
+
+// BuildMetaJSON constructs a raw metadata JSON (not base64-wrapped)
+// that can be uploaded directly as an Arweave transaction body.
+//
+// The returned JSON follows the IPFAR metadata specification:
+//
+//	{
+//	  "version": 1,
+//	  "method": "raw",
+//	  "root_cid": "bafkrei...",
+//	  "data_txid": "abc123...",
+//	  "data_height": 1920278,
+//	  "data_size": 1048576,
+//	  "content_type": "application/octet-stream",
+//	  "original_name": "test.bin",
+//	  "pow": "abc123...",
+//	  "pow_alg": "argon2id-light-v1"
+//	}
+func BuildMetaJSON(rootCID, dataTXID string, dataSize int64, dataHeight int, opts *MetaOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &MetaOptions{}
+	}
+
+	method := opts.Method
+	if method == "" {
+		method = MethodRaw
+	}
+
+	meta := Metadata{
+		Version:      Version1,
+		Method:       method,
+		RootCID:      rootCID,
+		DataTXID:     dataTXID,
+		DataHeight:   dataHeight,
+		DataSize:     int(dataSize),
+		ContentType:  opts.ContentType,
+		OriginalName: opts.OriginalName,
+		PoW:          opts.PoW,
+		PoWAlg:       opts.PoWAlg,
+		BundleTXID:   opts.BundleTXID,
+		Reference:    opts.Reference,
+	}
+
+	// Validate before returning
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("BuildMetaJSON: %w", err)
+	}
+
+	return meta.ToJSON()
 }

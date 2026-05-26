@@ -296,10 +296,20 @@ func TestValidate_InvalidDataTXID(t *testing.T) {
 
 func TestValidate_NegativeDataHeight(t *testing.T) {
 	meta := validMeta()
-	meta.DataHeight = -1
+	meta.DataHeight = -2 // -2 应被拒绝，-1 允许
 	err := meta.Validate()
 	if err == nil {
-		t.Fatal("Expected error for negative data_height")
+		t.Fatal("Expected error for data_height < -1")
+	}
+}
+
+func TestValidate_NegativeOneDataHeight(t *testing.T) {
+	meta := validMeta()
+	meta.Method = MethodBundle
+	meta.DataHeight = -1     // -1 表示同 Bundle
+	meta.BundleTXID = "none" // 规范 §2.2：data_height=-1 时 bundle_txid 必须为 "none"
+	if err := meta.Validate(); err != nil {
+		t.Errorf("data_height = -1 with bundle_txid='none' should be valid, got: %v", err)
 	}
 }
 
@@ -428,13 +438,26 @@ func TestValidate_ReferenceNegativeHeight(t *testing.T) {
 	meta := validMeta()
 	meta.Reference = &ReferenceMap{
 		"txid_123456789012345678901234567890123456789012": {
-			Height: -1,
+			Height: -2, // -2 应被拒绝，-1 允许
 			CIDs:   []string{"bafyCID1"},
 		},
 	}
 	err := meta.Validate()
 	if err == nil {
-		t.Fatal("Expected error for reference with negative height")
+		t.Fatal("Expected error for reference with height < -1")
+	}
+}
+
+func TestValidate_ReferenceNegativeOneHeight(t *testing.T) {
+	meta := validMeta()
+	meta.Reference = &ReferenceMap{
+		"txid_123456789012345678901234567890123456789012": {
+			Height: -1, // -1 表示同 Bundle，应允许
+			CIDs:   []string{"bafyCID1"},
+		},
+	}
+	if err := meta.Validate(); err != nil {
+		t.Errorf("Reference with height = -1 should be valid, got: %v", err)
 	}
 }
 
@@ -879,6 +902,200 @@ func TestTagSlice_EmptyToMap(t *testing.T) {
 // ============================================================
 // 辅助函数
 // ============================================================
+
+// ============================================================
+// BuildMetaJSON 测试
+// ============================================================
+
+func TestBuildMetaJSON_UnitTest(t *testing.T) {
+	t.Run("ValidLargeFile", func(t *testing.T) {
+		rootCID := "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+		dataTXID := "arweave_tx_id_1234567890123456789012345678901234567890"
+		dataSize := int64(200 * 1024 * 1024) // 200 MiB, no PoW needed
+		dataHeight := 1913000
+
+		jsonBytes, err := BuildMetaJSON(rootCID, dataTXID, dataSize, dataHeight, nil)
+		if err != nil {
+			t.Fatalf("BuildMetaJSON failed: %v", err)
+		}
+
+		// Parse back and verify
+		meta, err := ParseJSON(jsonBytes)
+		if err != nil {
+			t.Fatalf("ParseJSON of BuildMetaJSON output failed: %v", err)
+		}
+
+		if meta.Version != 1 {
+			t.Errorf("version = %d, want 1", meta.Version)
+		}
+		if meta.Method != "raw" {
+			t.Errorf("method = %s, want raw", meta.Method)
+		}
+		if meta.RootCID != rootCID {
+			t.Errorf("root_cid = %s, want %s", meta.RootCID, rootCID)
+		}
+		if meta.DataTXID != dataTXID {
+			t.Errorf("data_txid = %s, want %s", meta.DataTXID, dataTXID)
+		}
+		if meta.DataHeight != dataHeight {
+			t.Errorf("data_height = %d, want %d", meta.DataHeight, dataHeight)
+		}
+		if meta.DataSize != int(dataSize) {
+			t.Errorf("data_size = %d, want %d", meta.DataSize, dataSize)
+		}
+
+		// Validate should also pass
+		if err := meta.Validate(); err != nil {
+			t.Errorf("Validate failed for BuildMetaJSON output: %v", err)
+		}
+	})
+
+	t.Run("SmallFileWithPoW", func(t *testing.T) {
+		rootCID := "bafyTestCIDSmall"
+		dataTXID := "small_tx_1234567890123456789012345678901234567890"
+		dataSize := int64(1024) // 1 KiB, PoW needed
+		dataHeight := 100
+
+		opts := &MetaOptions{
+			Method:       MethodRaw,
+			ContentType:  "image/png",
+			OriginalName: "test.png",
+			PoW:          "42",
+			PoWAlg:       "argon2id-light-v1",
+		}
+
+		jsonBytes, err := BuildMetaJSON(rootCID, dataTXID, dataSize, dataHeight, opts)
+		if err != nil {
+			t.Fatalf("BuildMetaJSON with PoW failed: %v", err)
+		}
+
+		meta, err := ParseJSON(jsonBytes)
+		if err != nil {
+			t.Fatalf("ParseJSON failed: %v", err)
+		}
+
+		if meta.PoW != "42" {
+			t.Errorf("pow = %s, want 42", meta.PoW)
+		}
+		if meta.PoWAlg != "argon2id-light-v1" {
+			t.Errorf("pow_alg = %s, want argon2id-light-v1", meta.PoWAlg)
+		}
+		if meta.ContentType != "image/png" {
+			t.Errorf("content_type = %s, want image/png", meta.ContentType)
+		}
+		if meta.OriginalName != "test.png" {
+			t.Errorf("original_name = %s, want test.png", meta.OriginalName)
+		}
+
+		if err := meta.Validate(); err != nil {
+			t.Errorf("Validate failed: %v", err)
+		}
+	})
+
+	t.Run("BundleMethod", func(t *testing.T) {
+		rootCID := "bafyBundleCID123456789012345678901234567890123456789"
+		dataTXID := "bundle_tx_12345678901234567890123456789012345678901"
+		dataSize := int64(500 * 1024 * 1024) // 500 MiB, no PoW
+		dataHeight := 2000000
+
+		opts := &MetaOptions{
+			Method:     MethodBundle,
+			BundleTXID: "bundle_inner_tx_1234567890123456789012345678901",
+		}
+
+		jsonBytes, err := BuildMetaJSON(rootCID, dataTXID, dataSize, dataHeight, opts)
+		if err != nil {
+			t.Fatalf("BuildMetaJSON bundle failed: %v", err)
+		}
+
+		meta, err := ParseJSON(jsonBytes)
+		if err != nil {
+			t.Fatalf("ParseJSON failed: %v", err)
+		}
+
+		if meta.Method != MethodBundle {
+			t.Errorf("method = %s, want bundle", meta.Method)
+		}
+		if meta.BundleTXID != "bundle_inner_tx_1234567890123456789012345678901" {
+			t.Errorf("bundle_txid mismatch")
+		}
+
+		if err := meta.Validate(); err != nil {
+			t.Errorf("Validate failed: %v", err)
+		}
+	})
+
+	t.Run("WithReference", func(t *testing.T) {
+		rootCID := "bafyRefCID12345678901234567890123456789012345678901"
+		dataTXID := "ref_tx_1234567890123456789012345678901234567890123"
+		dataSize := int64(50 * 1024 * 1024) // 50 MiB, needs PoW
+		dataHeight := 1913001
+
+		ref := &ReferenceMap{
+			"chunk_tx_1_12345678901234567890123456789012345678901": {
+				Height: 1913002,
+				CIDs:   []string{"bafySharedCID1", "bafySharedCID2"},
+			},
+		}
+
+		opts := &MetaOptions{
+			PoW:        "100",
+			PoWAlg:     "argon2id-light-v1",
+			Reference:  ref,
+		}
+
+		jsonBytes, err := BuildMetaJSON(rootCID, dataTXID, dataSize, dataHeight, opts)
+		if err != nil {
+			t.Fatalf("BuildMetaJSON with reference failed: %v", err)
+		}
+
+		meta, err := ParseJSON(jsonBytes)
+		if err != nil {
+			t.Fatalf("ParseJSON failed: %v", err)
+		}
+
+		if meta.Reference == nil {
+			t.Fatal("reference should not be nil")
+		}
+		if len(*meta.Reference) != 1 {
+			t.Errorf("reference count = %d, want 1", len(*meta.Reference))
+		}
+
+		if err := meta.Validate(); err != nil {
+			t.Errorf("Validate failed: %v", err)
+		}
+	})
+
+	t.Run("DefaultMethod", func(t *testing.T) {
+		// Nil opts should default to "raw" method
+		rootCID := "bafyDefaultMethodCID123456789012345678901234567890123"
+		dataTXID := "default_tx_1234567890123456789012345678901234567890"
+		dataSize := int64(200 * 1024 * 1024)
+		dataHeight := 100
+
+		jsonBytes, err := BuildMetaJSON(rootCID, dataTXID, dataSize, dataHeight, nil)
+		if err != nil {
+			t.Fatalf("BuildMetaJSON with nil opts failed: %v", err)
+		}
+
+		meta, err := ParseJSON(jsonBytes)
+		if err != nil {
+			t.Fatalf("ParseJSON failed: %v", err)
+		}
+
+		if meta.Method != "raw" {
+			t.Errorf("default method should be 'raw', got %s", meta.Method)
+		}
+	})
+
+	t.Run("InvalidDataSize", func(t *testing.T) {
+		_, err := BuildMetaJSON("cid", "txid", 0, 100, nil)
+		if err == nil {
+			t.Fatal("expected error for zero data_size")
+		}
+		t.Logf("Got expected error: %v", err)
+	})
+}
 
 // validMeta 返回一个有效的 Metadata 实例
 func validMeta() *Metadata {

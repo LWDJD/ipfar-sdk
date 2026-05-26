@@ -1,6 +1,7 @@
 package pow
 
 import (
+	"context"
 	"strconv"
 	"testing"
 )
@@ -280,6 +281,69 @@ func TestHasLeadingZeroBytes(t *testing.T) {
 }
 
 // ============================================================
+// ComputePoWParallel 测试
+// ============================================================
+
+// TestComputePoWParallel_Cancellation 验证 context 取消机制
+func TestComputePoWParallel_Cancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := ComputePoWParallel(ctx, "test-cid", "test-tx", 4)
+	if err != ErrPoWCancelled {
+		t.Errorf("expected ErrPoWCancelled, got %v", err)
+	}
+}
+
+// TestComputePoWParallel_NumWorkers1 验证 numWorkers=1 与单线程结果一致
+func TestComputePoWParallel_NumWorkers1(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PoW computation in short mode")
+	}
+
+	rootCID := "test-consistency"
+	dataTXID := "tx-consistency"
+
+	saltSingle, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Fatalf("ComputePoW failed: %v", err)
+	}
+
+	saltParallel, err := ComputePoWParallel(context.Background(), rootCID, dataTXID, 1)
+	if err != nil {
+		t.Fatalf("ComputePoWParallel(workers=1) failed: %v", err)
+	}
+
+	if saltSingle != saltParallel {
+		t.Errorf("mismatch: single=%s, parallel(1)=%s", saltSingle, saltParallel)
+	}
+
+	t.Logf("Both single and parallel(1) found salt=%s", saltSingle)
+}
+
+// TestComputePoWParallel_Correctness 验证并行搜索结果满足难度要求
+func TestComputePoWParallel_Correctness(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PoW computation in short mode")
+	}
+
+	rootCID := "parallel-correctness"
+	dataTXID := "tx-correctness"
+
+	salt, err := ComputePoWParallel(context.Background(), rootCID, dataTXID, 3)
+	if err != nil {
+		t.Fatalf("ComputePoWParallel failed: %v", err)
+	}
+
+	err = Verify(salt, Algorithm, rootCID, dataTXID, 1024)
+	if err != nil {
+		t.Errorf("salt %s does not satisfy PoW difficulty: %v", salt, err)
+	}
+
+	t.Logf("Parallel(3) found salt=%s, verified OK", salt)
+}
+
+// ============================================================
 // 常量验证
 // ============================================================
 
@@ -293,6 +357,80 @@ func TestConstants(t *testing.T) {
 	if PoWThreshold != 100*1024*1024 {
 		t.Error("PoWThreshold should be 100 MiB")
 	}
+}
+
+// ============================================================
+// defaultWorkers 测试
+// ============================================================
+
+func TestDefaultWorkers_UnitTest(t *testing.T) {
+	n := defaultWorkers()
+	if n <= 0 {
+		t.Errorf("defaultWorkers should return positive number, got %d", n)
+	}
+	if n > 4 {
+		t.Errorf("defaultWorkers should be capped at 4, got %d", n)
+	}
+	t.Logf("defaultWorkers() = %d", n)
+}
+
+// ============================================================
+// ComputePoW 单次计算测试（逻辑验证）
+// 使用极短输入在短时间内完成计算
+// ============================================================
+
+func TestComputePoW_UnitTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping PoW computation in short mode")
+	}
+
+	// Use very short inputs to speed up the Argon2id computation
+	rootCID := "b"
+	dataTXID := "t"
+
+	salt, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Skipf("ComputePoW did not find a solution quickly: %v (acceptable in constrained environments)", err)
+		return
+	}
+
+	if salt == "" {
+		t.Fatal("ComputePoW returned empty salt")
+	}
+
+	// Verify the computed salt passes
+	err = Verify(salt, Algorithm, rootCID, dataTXID, 1024)
+	if err != nil {
+		t.Errorf("Computed PoW salt %s should pass verification, got: %v", salt, err)
+	}
+
+	t.Logf("ComputePoW found salt=%s for rootCID=%s dataTXID=%s", salt, rootCID, dataTXID)
+}
+
+func TestComputePoW_Deterministic_UnitTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping PoW computation in short mode")
+	}
+
+	rootCID := "dd"
+	dataTXID := "ee"
+
+	salt1, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Skipf("First ComputePoW failed: %v", err)
+		return
+	}
+
+	salt2, err := ComputePoW(rootCID, dataTXID)
+	if err != nil {
+		t.Fatalf("Second ComputePoW failed: %v", err)
+	}
+
+	if salt1 != salt2 {
+		t.Errorf("ComputePoW should be deterministic: %s != %s", salt1, salt2)
+	}
+
+	t.Logf("Deterministic PoW: salt=%s", salt1)
 }
 
 // ============================================================

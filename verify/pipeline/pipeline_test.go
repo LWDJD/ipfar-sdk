@@ -21,8 +21,8 @@ func TestPresetConfigs(t *testing.T) {
 	}{
 		{SecurityStrict, true, true, true, true},
 		{SecurityBalanced, true, true, false, true},
-		{SecurityLight, true, false, true, false},
-		{SecurityTrusted, false, false, false, false},
+		{SecurityLight, true, true, true, false},
+		{SecurityTrusted, false, true, false, false},
 	}
 
 	for _, tt := range tests {
@@ -340,9 +340,9 @@ func TestVerify_WithCAR_AllPass(t *testing.T) {
 		t.Error("All-pass verifiers should result in passed")
 	}
 
-	// 应该包含所有 5 个步骤
-	if len(result.Results) != 5 {
-		t.Errorf("Expected 5 steps, got %d", len(result.Results))
+	// 应该包含所有 6 个步骤（含 index_existence）
+	if len(result.Results) != 6 {
+		t.Errorf("Expected 6 steps, got %d", len(result.Results))
 	}
 
 	for _, r := range result.Results {
@@ -597,6 +597,7 @@ func TestVerifyResult_AllStepsPresent(t *testing.T) {
 	expectedSteps := []string{
 		StepMetaValidate,
 		StepPoW,
+		StepIndexExistence,
 		StepIndex,
 		StepReferenceChain,
 		StepIntegrity,

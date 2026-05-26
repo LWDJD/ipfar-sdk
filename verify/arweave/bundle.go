@@ -521,30 +521,6 @@ func (p *BundleParser) FetchItemTags(itemIndex int) ([]Tag, error) {
 	return tags, nil
 }
 
-// =============================================================================
-// Exported wrappers for internal functions (used by arweave package)
-// =============================================================================
-
-// ByteArrayToLong converts a byte slice to an integer (little-endian).
-func ByteArrayToLong(b []byte) int {
-	return byteArrayToLong(b)
-}
-
-// Base64Encode encodes data to a base64 URL-safe string without padding.
-func Base64Encode(data []byte) string {
-	return base64Encode(data)
-}
-
-// DecodeBundleItem decodes an ANS-104 bundle item from its binary representation.
-func DecodeBundleItem(itemBinary []byte) (BundleItem, error) {
-	return decodeBundleItem(itemBinary)
-}
-
-// ExtractBundleItemData extracts and base64-decodes the data payload from a bundle item.
-func ExtractBundleItemData(item *BundleItem) ([]byte, error) {
-	return base64Decode(item.Data)
-}
-
 // ParseAll 解析并获取完整的捆绑包数据
 // 自动解析头部（如果尚未解析），然后获取所有数据项
 func (p *BundleParser) ParseAll() (Bundle, error) {
@@ -1100,6 +1076,38 @@ func tryFetchItemTags(url string, itemIndex int, meta ItemMeta) ([]Tag, error) {
 	}
 
 	return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
+}
+
+// =============================================================================
+// Exported helpers for cross-package use
+// =============================================================================
+
+// ByteArrayToLong converts a byte slice to an integer (little-endian).
+// This is the exported version of byteArrayToLong for use by other packages.
+func ByteArrayToLong(b []byte) int {
+	return byteArrayToLong(b)
+}
+
+// Base64Encode encodes data to base64url without padding.
+// This is the exported version of base64Encode for use by other packages.
+func Base64Encode(data []byte) string {
+	return base64Encode(data)
+}
+
+// DecodeBundleItem decodes binary ANS-104 data into a BundleItem.
+// This is the exported version of decodeBundleItem for use by other packages.
+func DecodeBundleItem(itemBinary []byte) (BundleItem, error) {
+	return decodeBundleItem(itemBinary)
+}
+
+// ExtractBundleItemData extracts the original data payload from a bundle item.
+// The BundleItem.Data field is base64url-encoded; this function decodes it
+// and returns the raw bytes.
+func ExtractBundleItemData(item *BundleItem) ([]byte, error) {
+	if item == nil {
+		return nil, errors.New("item is nil")
+	}
+	return base64Decode(item.Data)
 }
 
 // parseTagsFromItemData 从数据项的二进制数据中解析标签
