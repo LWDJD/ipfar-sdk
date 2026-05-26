@@ -22,11 +22,12 @@ const (
 
 // 验证步骤标识
 const (
-	StepMetaValidate   = "meta_validate"   // 元数据合法性校验（强制）
-	StepPoW            = "pow"             // PoW 验证
-	StepIndex          = "index"           // CAR v2 Index 完整性
-	StepReferenceChain = "reference_chain" // 引用链验证
-	StepIntegrity      = "integrity"       // 数据完整性验证
+	StepMetaValidate    = "meta_validate"    // 元数据合法性校验（强制）
+	StepPoW             = "pow"              // PoW 验证
+	StepIndexExistence  = "index_existence"  // Index 存在性检查
+	StepIndex           = "index"            // CAR v2 Index 完整性
+	StepReferenceChain  = "reference_chain"  // 引用链验证
+	StepIntegrity       = "integrity"        // 数据完整性验证
 )
 
 // VerifyConfig 验证配置
@@ -40,17 +41,19 @@ type VerifyConfig struct {
 
 // VerifyResult 单步验证结果
 type VerifyResult struct {
-	Step    string `json:"step"`    // 验证步骤标识
-	Passed  bool   `json:"passed"`  // 是否通过
-	Skipped bool   `json:"skipped"` // 是否跳过
-	Error   string `json:"error,omitempty"`   // 错误信息
-	Message string `json:"message,omitempty"` // 附加信息
+	Step       string `json:"step"`                 // 验证步骤标识
+	Passed     bool   `json:"passed"`               // 是否通过
+	Skipped    bool   `json:"skipped"`              // 是否跳过
+	Incomplete bool   `json:"incomplete,omitempty"`  // 是否未完成（网络等原因）
+	Error      string `json:"error,omitempty"`      // 错误信息
+	Message    string `json:"message,omitempty"`    // 附加信息
 }
 
 // PipelineResult 管道验证结果
 type PipelineResult struct {
-	Passed  bool           `json:"passed"`  // 是否全部通过
-	Results []VerifyResult `json:"results"` // 各步骤结果
+	Passed     bool           `json:"passed"`               // 是否全部通过
+	Incomplete bool           `json:"incomplete,omitempty"`  // 整体是否未完成
+	Results    []VerifyResult `json:"results"`              // 各步骤结果
 }
 
 // 错误定义
@@ -122,6 +125,9 @@ type Pipeline struct {
 
 	// CAR 文件解析器（可选，用于 Index 和 Integrity 验证）
 	carFile string // CAR 文件路径
+
+	// gatewayClient 用于引用链解析等需要网络访问的验证步骤
+	gatewayClient interface{}
 }
 
 // NewPipeline 创建新的验证管道
@@ -184,6 +190,43 @@ func (p *Pipeline) SetReferenceVerifier(fn func(meta *metadata.Metadata) error) 
 // SetIntegrityVerifier 注入自定义完整性验证器（用于测试）
 func (p *Pipeline) SetIntegrityVerifier(fn func() error) {
 	p.integrityVerifier = fn
+}
+
+// SetGatewayClient 设置 Arweave 网关客户端，用于引用链解析等网络验证步骤。
+func (p *Pipeline) SetGatewayClient(client interface{}) {
+	p.gatewayClient = client
+}
+
+// VerifyReferenceChain 单独执行引用链验证
+func (p *Pipeline) VerifyReferenceChain(meta *metadata.Metadata) (*VerifyResult, error) {
+	if meta == nil {
+		return &VerifyResult{
+			Step:       StepReferenceChain,
+			Passed:     false,
+			Incomplete: true,
+			Error:      "metadata is nil",
+		}, fmt.Errorf("metadata is nil")
+	}
+	if !meta.HasReference() {
+		return &VerifyResult{
+			Step:    StepReferenceChain,
+			Passed:  true,
+			Skipped: true,
+			Message: "no reference chain",
+		}, nil
+	}
+	err := p.referenceVerifier(meta)
+	if err != nil {
+		return &VerifyResult{
+			Step:   StepReferenceChain,
+			Passed: false,
+			Error:  err.Error(),
+		}, err
+	}
+	return &VerifyResult{
+		Step:   StepReferenceChain,
+		Passed: true,
+	}, nil
 }
 
 // Verify 执行验证管道

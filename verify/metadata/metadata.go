@@ -43,8 +43,9 @@ var (
 // ReferenceEntry 引用条目：一个被引用的 Arweave 交易
 // 格式：{"txid": {"height": 1913001, "cids": ["cid1", "cid2"]}}
 type ReferenceEntry struct {
-	Height int      `json:"height"` // 区块高度
-	CIDs   []string `json:"cids"`   // CID 列表
+	Height     int      `json:"height"`                // 区块高度，-1 表示 Bundle 模式
+	CIDs       []string `json:"cids"`                  // CID 列表
+	BundleTXID string   `json:"bundle_txid,omitempty"` // Bundle TX ID（跨 Bundle 引用时）
 }
 
 // ReferenceMap 引用映射：key = Arweave 交易 ID，value = 引用条目
@@ -57,8 +58,9 @@ type Metadata struct {
 	Method       string         `json:"method"`                  // 必填：上传方式 "raw" / "bundle"
 	RootCID      string         `json:"root_cid"`                // 必填：根 CID（Base32）
 	DataTXID     string         `json:"data_txid"`               // 必填：主 CAR 文件 Arweave TX ID
-	DataHeight   int            `json:"data_height"`             // 必填：data_txid 所属区块高度
+	DataHeight   int            `json:"data_height"`             // 必填：data_txid 所属区块高度，-1 表示 Bundle 模式
 	DataSize     int            `json:"data_size"`               // 必填：原始数据大小（字节）
+	BundleTXID   string         `json:"bundle_txid,omitempty"`   // Bundle TX ID（跨 Bundle 时非空，"none" 表示同 Bundle）
 	Reference    *ReferenceMap  `json:"reference,omitempty"`     // 可选：引用映射（去重/分块）
 	ContentType  string         `json:"content_type,omitempty"`  // 可选：MIME 类型
 	OriginalName string         `json:"original_name,omitempty"` // 可选：原始文件名
@@ -135,11 +137,10 @@ func (m *Metadata) Validate() error {
 		return fmt.Errorf("%w: %q", ErrInvalidDataTXID, m.DataTXID)
 	}
 
-	// 5. data_height：必填，非负整数
-	if m.DataHeight < 0 {
+	// 5. data_height：必填，非负整数（-1 表示 Bundle 模式）
+	if m.DataHeight < -1 {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataHeight, m.DataHeight)
 	}
-	// data_height 为 0 时也视为有效（创世区块或未知高度）
 
 	// 6. data_size：必填，正整数
 	if m.DataSize <= 0 {
@@ -179,6 +180,18 @@ func (m *Metadata) NeedsPoW() bool {
 // HasReference 判断是否包含引用
 func (m *Metadata) HasReference() bool {
 	return m.Reference != nil && len(*m.Reference) > 0
+}
+
+// IsCrossBundle 判断是否为跨 Bundle 模式
+// data_height = -1 且 bundle_txid 非空且不为 "none"
+func (m *Metadata) IsCrossBundle() bool {
+	return m.DataHeight == -1 && m.BundleTXID != "" && m.BundleTXID != "none"
+}
+
+// IsSameBundle 判断是否为同 Bundle 模式
+// data_height = -1 且 bundle_txid = "none"
+func (m *Metadata) IsSameBundle() bool {
+	return m.DataHeight == -1 && m.BundleTXID == "none"
 }
 
 // ToJSON 序列化为 JSON 字节数组

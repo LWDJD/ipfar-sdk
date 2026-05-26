@@ -213,6 +213,108 @@ func (p *CarParser) parseCarV1Info() (*CarInfo, error) {
 	return p.info, nil
 }
 
+// =============================================================================
+// Standalone utility functions (no CarParser instance required)
+// =============================================================================
+
+// ParseIndexData parses CAR v2 index data bytes into a CID→offset map.
+// This is a standalone function that does not require a CarParser instance.
+// The input is the raw index segment bytes (typically fetched via HTTP Range).
+// Returns a map from CID string to byte offset within the CAR file.
+func ParseIndexData(indexData []byte) (map[string]uint64, error) {
+	if len(indexData) == 0 {
+		return nil, ErrEmptyIndex
+	}
+
+	// Create a minimal parser just for index parsing
+	tmpParser := &CarParser{}
+	entries, err := tmpParser.parseIndexData(indexData)
+	if err != nil {
+		return nil, fmt.Errorf("ParseIndexData: %w", err)
+	}
+
+	result := make(map[string]uint64, len(entries))
+	for _, entry := range entries {
+		result[entry.CID.String()] = entry.Offset
+	}
+	return result, nil
+}
+
+// ExtractBlockFromCar extracts a single IPFS block from CAR data at the given offset.
+// carData is a byte slice containing CAR-format data (typically an HTTP Range response).
+// offset is the position within carData where the target block starts (0 for Range-aligned reads).
+// Returns the pure data payload of the block (without the CID/varint framing).
+func ExtractBlockFromCar(carData []byte, offset uint64) ([]byte, error) {
+	if len(carData) == 0 {
+		return nil, fmt.Errorf("ExtractBlockFromCar: empty car data")
+	}
+	if offset >= uint64(len(carData)) {
+		return nil, fmt.Errorf("ExtractBlockFromCar: offset %d exceeds data length %d", offset, len(carData))
+	}
+
+	data := carData[offset:]
+
+	// Read section length (varint)
+	sectionLen, n, err := readVarintFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("ExtractBlockFromCar: failed to read section length: %w", err)
+	}
+	if sectionLen == 0 {
+		return nil, fmt.Errorf("ExtractBlockFromCar: zero-length section")
+	}
+
+	pos := n
+
+	// Read CID from the section
+	if pos >= len(data) {
+		return nil, fmt.Errorf("ExtractBlockFromCar: data too short for CID")
+	}
+
+	cidBytes := make([]byte, sectionLen)
+	// We only have a chunk, so we need to get the CID from what's available
+	copyLen := int(sectionLen)
+	if copyLen > len(data[pos:]) {
+		copyLen = len(data[pos:])
+	}
+	copy(cidBytes, data[pos:])
+
+	_, blockCID, err := cid.CidFromBytes(cidBytes)
+	if err != nil {
+		return nil, fmt.Errorf("ExtractBlockFromCar: invalid CID: %w", err)
+	}
+
+	cidLen := blockCID.ByteLen()
+	dataLen := int(sectionLen) - cidLen
+
+	// The data starts after the varint + CID
+	dataStart := pos + cidLen
+
+	if dataLen < 0 {
+		return nil, fmt.Errorf("ExtractBlockFromCar: invalid block: CID length %d > section length %d", cidLen, sectionLen)
+	}
+
+	if dataStart+dataLen > len(data) {
+		return nil, fmt.Errorf("ExtractBlockFromCar: data extends beyond available bytes (need %d, have %d)", dataStart+dataLen, len(data))
+	}
+
+	blockData := make([]byte, dataLen)
+	copy(blockData, data[dataStart:dataStart+dataLen])
+
+	return blockData, nil
+}
+
+// readVarintFromBytes reads a varint from a byte slice, returning the value and bytes consumed.
+func readVarintFromBytes(data []byte) (uint64, int, error) {
+	value, n, err := varint.FromUvarint(data)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid varint: %w", err)
+	}
+	if n <= 0 {
+		return 0, 0, fmt.Errorf("invalid varint: zero-length read")
+	}
+	return value, n, nil
+}
+
 // parseCarV2Info 解析 CARv2 元信息
 func (p *CarParser) parseCarV2Info() (*CarInfo, error) {
 	v2Header, err := p.readCarV2Header()

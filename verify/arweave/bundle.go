@@ -521,6 +521,30 @@ func (p *BundleParser) FetchItemTags(itemIndex int) ([]Tag, error) {
 	return tags, nil
 }
 
+// =============================================================================
+// Exported wrappers for internal functions (used by arweave package)
+// =============================================================================
+
+// ByteArrayToLong converts a byte slice to an integer (little-endian).
+func ByteArrayToLong(b []byte) int {
+	return byteArrayToLong(b)
+}
+
+// Base64Encode encodes data to a base64 URL-safe string without padding.
+func Base64Encode(data []byte) string {
+	return base64Encode(data)
+}
+
+// DecodeBundleItem decodes an ANS-104 bundle item from its binary representation.
+func DecodeBundleItem(itemBinary []byte) (BundleItem, error) {
+	return decodeBundleItem(itemBinary)
+}
+
+// ExtractBundleItemData extracts and base64-decodes the data payload from a bundle item.
+func ExtractBundleItemData(item *BundleItem) ([]byte, error) {
+	return base64Decode(item.Data)
+}
+
 // ParseAll 解析并获取完整的捆绑包数据
 // 自动解析头部（如果尚未解析），然后获取所有数据项
 func (p *BundleParser) ParseAll() (Bundle, error) {
