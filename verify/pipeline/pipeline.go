@@ -46,17 +46,19 @@ type VerifyConfig struct {
 
 // VerifyResult 单步验证结果
 type VerifyResult struct {
-	Step    string `json:"step"`    // 验证步骤标识
-	Passed  bool   `json:"passed"`  // 是否通过
-	Skipped bool   `json:"skipped"` // 是否跳过
-	Error   string `json:"error,omitempty"`   // 错误信息
-	Message string `json:"message,omitempty"` // 附加信息
+	Step       string `json:"step"`                 // 验证步骤标识
+	Passed     bool   `json:"passed"`               // 是否通过
+	Skipped    bool   `json:"skipped"`              // 是否跳过
+	Incomplete bool   `json:"incomplete,omitempty"` // 是否不完整（引用链无法完全解析时标记）
+	Error      string `json:"error,omitempty"`      // 错误信息
+	Message    string `json:"message,omitempty"`    // 附加信息
 }
 
 // PipelineResult 管道验证结果
 type PipelineResult struct {
-	Passed  bool           `json:"passed"`  // 是否全部通过
-	Results []VerifyResult `json:"results"` // 各步骤结果
+	Passed     bool           `json:"passed"`               // 是否全部通过
+	Incomplete bool           `json:"incomplete,omitempty"`  // 是否有步骤不完整（如引用链无法完全解析）
+	Results    []VerifyResult `json:"results"`               // 各步骤结果
 }
 
 // 错误定义
@@ -169,6 +171,12 @@ func (p *Pipeline) SetCarFile(carPath string) {
 // SetGatewayClient 设置 Arweave 网关客户端，用于引用链解析等网络验证步骤。
 func (p *Pipeline) SetGatewayClient(client *arweave.GatewayClient) {
 	p.gatewayClient = client
+}
+
+// VerifyReferenceChain 独立执行引用链验证（供外部调用）
+// 用于在线验证等不需要完整 pipeline 的场景。
+func (p *Pipeline) VerifyReferenceChain(meta *metadata.Metadata) error {
+	return p.referenceVerifier(meta)
 }
 
 // NewPipelineWithPreset 从预设创建验证管道
@@ -293,12 +301,22 @@ func (p *Pipeline) Verify(meta *metadata.Metadata, carAvailable bool) *PipelineR
 	}
 
 	// Step 4: 引用链验证
-	vr = p.executeStep(StepReferenceChain, p.config.VerifyReferenceChain, func() error {
-		return p.referenceVerifier(meta)
+	vr = p.executeStepWithIncomplete(StepReferenceChain, p.config.VerifyReferenceChain, func() (bool, error) {
+		err := p.referenceVerifier(meta)
+		if err != nil {
+			if refErr, ok := err.(*ReferenceIncompleteError); ok {
+				return true, refErr // incomplete=true, error=refErr
+			}
+			return false, err // hard failure
+		}
+		return false, nil // complete success
 	})
 	result.Results = append(result.Results, vr)
 	if !vr.Passed && !vr.Skipped {
 		result.Passed = false
+	}
+	if vr.Incomplete {
+		result.Incomplete = true
 	}
 
 	// Step 5: 数据完整性验证
@@ -327,6 +345,44 @@ func (p *Pipeline) executeStep(step string, enabled bool, fn func() error) Verif
 
 	err := fn()
 	if err != nil {
+		return VerifyResult{
+			Step:   step,
+			Passed: false,
+			Error:  err.Error(),
+		}
+	}
+
+	return VerifyResult{
+		Step:   step,
+		Passed: true,
+	}
+}
+
+// executeStepWithIncomplete 执行带不完整标记的验证步骤
+// fn 返回 (incomplete bool, error)
+//   - incomplete=true, err!=nil: 标记为不完整但通过（非致命错误）
+//   - incomplete=false, err!=nil: 标记为失败
+//   - err==nil: 正常通过
+func (p *Pipeline) executeStepWithIncomplete(step string, enabled bool, fn func() (bool, error)) VerifyResult {
+	if !enabled {
+		return VerifyResult{
+			Step:    step,
+			Passed:  true,
+			Skipped: true,
+			Message: "verification disabled by config",
+		}
+	}
+
+	incomplete, err := fn()
+	if err != nil {
+		if incomplete {
+			return VerifyResult{
+				Step:       step,
+				Passed:     true,
+				Incomplete: true,
+				Message:    fmt.Sprintf("reference chain incomplete: %v", err),
+			}
+		}
 		return VerifyResult{
 			Step:   step,
 			Passed: false,
@@ -429,6 +485,7 @@ const MaxReferenceDepth = 10
 // 解析 metadata 的 reference 字段，递归验证引用链。
 //
 // 规范 §4.6：链式解析自动递归、无深度限制（实现中设置 MaxReferenceDepth=10 防循环）。
+// 规范 §4.7：如果桥节点无法解析所有引用链，该文件标记为"不完整"而非直接失败。
 func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 	// 如果元数据没有引用，则自动通过
 	if meta == nil || !meta.HasReference() {
@@ -444,7 +501,22 @@ func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 	ctx := context.Background()
 	visited := make(map[string]bool) // 防循环
 
-	return p.resolveReferences(ctx, *meta.Reference, visited, 0)
+	incompletes := p.resolveReferences(ctx, *meta.Reference, visited, 0)
+	if len(incompletes) > 0 {
+		// 有未完成的引用：标记为不完整而非直接失败
+		return &ReferenceIncompleteError{Errors: incompletes}
+	}
+
+	return nil
+}
+
+// ReferenceIncompleteError 表示引用链验证不完整（非致命错误）
+type ReferenceIncompleteError struct {
+	Errors []string
+}
+
+func (e *ReferenceIncompleteError) Error() string {
+	return fmt.Sprintf("reference chain incomplete: %d reference(s) could not be resolved: %v", len(e.Errors), e.Errors)
 }
 
 // resolveReferences 递归解析引用链（BFS/DFS）。
@@ -454,10 +526,14 @@ func (p *Pipeline) defaultReferenceVerifier(meta *metadata.Metadata) error {
 //  2. 计算 CID 并比对
 //  3. 检查被引用交易是否也有 reference 字段
 //  4. 若有，递归解析
-func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.ReferenceMap, visited map[string]bool, depth int) error {
+//
+// 返回未完成解析的引用错误列表（nil 表示全部成功解析）。
+func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.ReferenceMap, visited map[string]bool, depth int) []string {
 	if depth > MaxReferenceDepth {
-		return fmt.Errorf("reference chain: max depth %d exceeded", MaxReferenceDepth)
+		return []string{fmt.Sprintf("max depth %d exceeded at depth %d", MaxReferenceDepth, depth)}
 	}
+
+	var incompletes []string
 
 	for txID, entry := range ref {
 		// 防循环
@@ -477,20 +553,23 @@ func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.Reference
 			// 跨 Bundle 引用：通过 Bundle Item API 获取
 			data, err = p.gatewayClient.FetchBundleItemByID(ctx, entry.BundleTXID, txID)
 			if err != nil {
-				return fmt.Errorf("reference chain: failed to fetch bundle item %s from bundle %s: %w", txID, entry.BundleTXID, err)
+				incompletes = append(incompletes, fmt.Sprintf("tx %s (bundle %s): download failed: %v", txID, entry.BundleTXID, err))
+				continue
 			}
 		} else {
 			// 常规引用（同 Bundle 或同块）：直接下载交易数据
 			data, err = p.gatewayClient.DownloadTransactionData(ctx, txID)
 			if err != nil {
-				return fmt.Errorf("reference chain: failed to download tx %s: %w", txID, err)
+				incompletes = append(incompletes, fmt.Sprintf("tx %s: download failed: %v", txID, err))
+				continue
 			}
 		}
 
 		// 2. 计算下载数据的 CID
 		computedCID, err := computeCIDv1(data)
 		if err != nil {
-			return fmt.Errorf("reference chain: failed to compute CID for tx %s: %w", txID, err)
+			incompletes = append(incompletes, fmt.Sprintf("tx %s: CID computation failed: %v", txID, err))
+			continue
 		}
 
 		// 检查计算的 CID 是否匹配引用条目中的任意 CID
@@ -502,7 +581,8 @@ func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.Reference
 			}
 		}
 		if !matched {
-			return fmt.Errorf("reference chain: tx %s data CID %s does not match any expected CID in reference", txID, computedCID)
+			incompletes = append(incompletes, fmt.Sprintf("tx %s: data CID %s does not match any expected CID", txID, computedCID))
+			continue
 		}
 
 		// 3. 检查被引用交易是否也是元数据 JSON（含 reference 字段）
@@ -514,13 +594,12 @@ func (p *Pipeline) resolveReferences(ctx context.Context, ref metadata.Reference
 
 		// 4. 如果被引用交易也有 reference 字段，递归解析
 		if subMeta.HasReference() {
-			if err := p.resolveReferences(ctx, *subMeta.Reference, visited, depth+1); err != nil {
-				return err
-			}
+			subIncompletes := p.resolveReferences(ctx, *subMeta.Reference, visited, depth+1)
+			incompletes = append(incompletes, subIncompletes...)
 		}
 	}
 
-	return nil
+	return incompletes
 }
 
 // tryParseMetadata 尝试将数据解析为 Metadata JSON。

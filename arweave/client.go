@@ -103,6 +103,63 @@ func (gc *GatewayClient) ensureUserAgentTransport() {
 // Basic gateway endpoints
 // =============================================================================
 
+// CheckHealth checks the gateway's health by calling GET /info.
+// Returns nil if the gateway responds with HTTP 200, or an error otherwise.
+func (gc *GatewayClient) CheckHealth(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/info", nil)
+	if err != nil {
+		return fmt.Errorf("health check request failed: %w", err)
+	}
+	resp, err := gc.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("health check failed for %s: %w", gc.GatewayURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check failed for %s: HTTP %d", gc.GatewayURL, resp.StatusCode)
+	}
+	return nil
+}
+
+// GetNetworkInfo retrieves current network information from GET /info.
+// Returns the parsed info map including network height, version, etc.
+func (gc *GatewayClient) GetNetworkInfo(ctx context.Context) (*NetworkInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/info", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := gc.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network info: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var info NetworkInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("failed to decode network info: %w", err)
+	}
+	return &info, nil
+}
+
+// NetworkInfo holds Arweave network information returned by GET /info.
+type NetworkInfo struct {
+	Network          string `json:"network"`
+	Version          int    `json:"version"`
+	Release          int    `json:"release"`
+	Height           int64  `json:"height"`
+	Current          string `json:"current"`
+	Blocks           int64  `json:"blocks"`
+	Peers            int    `json:"peers"`
+	QueueLength      int    `json:"queue_length"`
+	NodeStateLatency int64  `json:"node_state_latency"`
+}
+
 // GetAnchor retrieves a recent transaction anchor from the gateway.
 func (gc *GatewayClient) GetAnchor(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", gc.GatewayURL+"/tx_anchor", nil)
