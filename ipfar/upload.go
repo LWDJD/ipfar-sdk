@@ -2,6 +2,7 @@ package ipfar
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 
 	// ── 2. Dedup / Upload CAR ────────────────────────────────────────
 	gateways := opts.GatewayURLs
+	var arweaveBundleTXID string // Arweave TX ID of the bundle transaction (for metaOpts)
 
 	if opts.Bundle {
 		// Bundle mode: wrap CAR in ANS-104 Bundle
@@ -72,11 +74,12 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		fmt.Fprintf(os.Stderr, " done (%s bytes)\n", formatNumber(len(carBytes)))
 
 		log.Info(ctx, "building ANS-104 bundle...")
-		bundleTXID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
+		bundleTXID, itemID, bundleHeight, err := uploadAsBundle(ctx, arw, wallet, carBytes, result, gateways)
 		if err != nil {
 			return result, fmt.Errorf("upload bundle: %w", err)
 		}
-		result.DataTXID = bundleTXID
+		arweaveBundleTXID = bundleTXID
+		result.DataTXID = itemID // Bundle Item ID (not Arweave TX ID)
 		result.DataHeight = bundleHeight
 		fmt.Fprintf(os.Stderr, " done (tx=%s, height=%d)\n", shortTXID(bundleTXID), bundleHeight)
 	} else {
@@ -185,7 +188,7 @@ func Upload(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wal
 		PoWAlg:       powAlg,
 	}
 	if opts.Bundle {
-		metaOpts.BundleTXID = result.DataTXID
+		metaOpts.BundleTXID = arweaveBundleTXID
 	}
 
 	log.Info(ctx, "building metadata...")
@@ -299,7 +302,7 @@ func truncateSalt(salt string) string {
 
 // uploadAsBundle wraps CAR bytes in an ANS-104 Bundle and uploads it.
 // Returns the bundle transaction ID and block height.
-func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wallet, carBytes []byte, result *UploadResult, gateways []string) (string, int, error) {
+func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arweave.Wallet, carBytes []byte, result *UploadResult, gateways []string) (string, string, int, error) {
 	// 1. Create ANS-104 DataItem with CAR bytes
 	item := bundle.NewDataItem()
 	item.SetData(carBytes)
@@ -312,7 +315,7 @@ func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arw
 
 	// 2. Sign the data item with wallet's RSA key
 	if err := item.SignWithRSA(wallet.PrivateKey); err != nil {
-		return "", 0, fmt.Errorf("sign data item: %w", err)
+		return "", "", 0, fmt.Errorf("sign data item: %w", err)
 	}
 
 	// 3. Build the bundle
@@ -320,7 +323,7 @@ func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arw
 	builder.AddItem(item)
 	bundleBytes, err := builder.Build()
 	if err != nil {
-		return "", 0, fmt.Errorf("build bundle: %w", err)
+		return "", "", 0, fmt.Errorf("build bundle: %w", err)
 	}
 
 	// 4. Upload the bundle as a raw transaction
@@ -334,10 +337,10 @@ func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arw
 
 	tx, status, err := arw.UploadDataRaw(ctx, wallet, bundleBytes, bundleTags)
 	if err != nil {
-		return "", 0, fmt.Errorf("upload bundle tx: %w", err)
+		return "", "", 0, fmt.Errorf("upload bundle tx: %w", err)
 	}
 	if tx == nil {
-		return "", 0, fmt.Errorf("upload bundle: nil transaction returned")
+		return "", "", 0, fmt.Errorf("upload bundle: nil transaction returned")
 	}
 
 	height := 0
@@ -345,5 +348,6 @@ func uploadAsBundle(ctx context.Context, arw *arweave.GatewayClient, wallet *arw
 		height = status.BlockHeight
 	}
 
-	return tx.ID, height, nil
+	itemID := base64.RawURLEncoding.EncodeToString(item.Id)
+	return tx.ID, itemID, height, nil
 }
