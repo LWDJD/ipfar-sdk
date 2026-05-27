@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/LWDJD/ipfar-sdk/arweave"
@@ -241,7 +242,7 @@ func newRemoteCarReader(ctx context.Context, gateway *arweave.GatewayClient, txI
 
 func (r *remoteCarReader) ReadAt(p []byte, off int64) (n int, err error) {
 	if off >= r.size {
-		return 0, fmt.Errorf("EOF")
+		return 0, io.EOF
 	}
 
 	end := off + int64(len(p)) - 1
@@ -256,7 +257,7 @@ func (r *remoteCarReader) ReadAt(p []byte, off int64) (n int, err error) {
 
 	// Simple approach: download full data and slice
 	if off >= int64(len(data)) {
-		return 0, fmt.Errorf("EOF")
+		return 0, io.EOF
 	}
 	endIdx := int(end) + 1
 	if endIdx > len(data) {
@@ -264,7 +265,7 @@ func (r *remoteCarReader) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 	n = copy(p, data[off:endIdx])
 	if off+int64(n) >= r.size {
-		return n, fmt.Errorf("EOF")
+		return n, io.EOF
 	}
 	return n, nil
 }

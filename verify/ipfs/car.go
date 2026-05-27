@@ -574,6 +574,13 @@ func (p *CarParser) ValidateIndex() error {
 		return nil
 	}
 
+	// Standard (go-car/v2) format: attempt to parse the index to verify
+	// it is complete and not truncated. A truncated file will cause
+	// carindex.ReadFrom to return "unexpected EOF".
+	if _, err := p.ParseIndex(); err != nil {
+		return fmt.Errorf("index parse failed: %w", err)
+	}
+
 	return nil
 }
 
