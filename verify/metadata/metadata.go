@@ -147,6 +147,11 @@ func (m *Metadata) Validate() error {
 		return fmt.Errorf("bundle_txid must be \"none\" when data_height = -1, got %q", m.BundleTXID)
 	}
 
+	// 5c. bundle_txid 约束：当 method=bundle 且 data_height >= 0 时，bundle_txid 不能为空
+	if m.Method == MethodBundle && m.DataHeight >= 0 && m.BundleTXID == "" {
+		return fmt.Errorf("bundle_txid is required when method=bundle and data_height>=0")
+	}
+
 	// 6. data_size：必填，正整数
 	if m.DataSize <= 0 {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataSize, m.DataSize)

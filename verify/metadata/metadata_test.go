@@ -239,6 +239,7 @@ func TestValidate_InvalidMethod(t *testing.T) {
 func TestValidate_MethodBundle(t *testing.T) {
 	meta := validMeta()
 	meta.Method = "bundle"
+	meta.BundleTXID = "bundle_tx_1234567890123456789012345678901234567890"
 	if err := meta.Validate(); err != nil {
 		t.Errorf("Method 'bundle' should be valid, got: %v", err)
 	}
