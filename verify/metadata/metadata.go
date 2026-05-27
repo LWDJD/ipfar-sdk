@@ -142,6 +142,11 @@ func (m *Metadata) Validate() error {
 		return fmt.Errorf("%w: got %d", ErrInvalidDataHeight, m.DataHeight)
 	}
 
+	// 5a. data_height = -1 仅对 bundle 模式有效
+	if m.DataHeight == -1 && m.Method != MethodBundle {
+		return fmt.Errorf("data_height=-1 is only valid when method=bundle (raw mode uses actual block height)")
+	}
+
 	// 5b. bundle_txid 约束：当 data_height = -1（同 Bundle）时，bundle_txid 必须为 "none"
 	if m.DataHeight == -1 && m.BundleTXID != "none" {
 		return fmt.Errorf("bundle_txid must be \"none\" when data_height = -1, got %q", m.BundleTXID)
