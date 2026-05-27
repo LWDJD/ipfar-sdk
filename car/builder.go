@@ -1,25 +1,24 @@
 // Package car provides CAR v2 file generation for IPFAR.
-// Converts raw data into CAR v2 format with CBOR index, ready for Arweave upload.
+// Uses the standard go-car/v2 library to produce spec-compliant CAR v2 files.
 package car
 
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 
+	carv2 "github.com/ipld/go-car/v2"
+	"github.com/ipld/go-car/v2/index"
 	"github.com/ipfs/go-cid"
 	mh "github.com/multiformats/go-multihash"
 	"github.com/multiformats/go-varint"
 )
 
-// carv2Pragma is the standard CAR v2 magic bytes "car\x02".
-// Spec: https://ipld.io/specs/transport/car/carv2/#format
-var carv2Pragma = []byte{0x63, 0x61, 0x72, 0x02}
-
-// BuildCAR creates a CAR v2 file from the given data and root CID.
-// The data is wrapped in a raw block and the provided rootCID is set
+// BuildCAR creates a standard CAR v2 file from the given data and root CID.
+// The data is wrapped in a single raw block and the provided rootCID is set
 // as the CAR root. Returns the complete CAR bytes ready for Arweave upload.
+//
+// Uses the standard CBOR pragma + 40-byte header format as per the CAR v2 spec.
 func BuildCAR(ctx context.Context, data []byte, rootCID string) ([]byte, error) {
 	select {
 	case <-ctx.Done():
@@ -38,51 +37,26 @@ func BuildCAR(ctx context.Context, data []byte, rootCID string) ([]byte, error) 
 		return nil, fmt.Errorf("failed to create data CID: %w", err)
 	}
 
-	// Build v1 header: version=1, roots=[root]
-	v1Header := buildV1Header([]cid.Cid{root})
+	// Build CAR v1 data in a buffer (standard CBOR header + varint blocks).
+	var v1Buf bytes.Buffer
 
-	// Encode the single data block.
+	// Write standard CBOR-encoded CAR v1 header.
+	// Format: ld-varint(cbor_len) + CBOR(map{"Roots": [CID], "Version": 1})
+	v1Header := buildCBORV1Header([]cid.Cid{root})
+	v1Buf.Write(v1Header)
+
+	// Write the data block.
 	blockBytes := encodeBlock(dataCID, data)
+	v1Buf.Write(blockBytes)
 
-	// Build the CBOR index.
-	index := buildIndex([]indexEntry{
-		{cid: dataCID, offset: 0},
-	})
-
-	// Pad index to 8-byte alignment (standard practice).
-	padLen := (8 - (len(index) % 8)) % 8
-	if padLen > 0 {
-		index = append(index, make([]byte, padLen)...)
+	// Wrap as CAR v2 using go-car/v2's WrapV1.
+	// This generates a proper index and the standard CAR v2 wrapper.
+	var v2Buf bytes.Buffer
+	if err := carv2.WrapV1(bytes.NewReader(v1Buf.Bytes()), &v2Buf); err != nil {
+		return nil, fmt.Errorf("failed to wrap CAR v1 as CAR v2: %w", err)
 	}
 
-	// Compute offsets.
-	pragmaSize := int64(len(carv2Pragma))
-	v2HeaderSize := int64(48)
-	v1HeaderSize := int64(len(v1Header))
-	dataOffset := pragmaSize + v2HeaderSize
-	dataSize := v1HeaderSize + int64(len(blockBytes))
-	indexOffset := dataOffset + dataSize
-	indexSize := int64(len(index))
-
-	v2Header := buildV2HeaderWithIndexSize(uint64(dataOffset), uint64(dataSize), uint64(indexOffset), uint64(indexSize))
-
-	// Assemble.
-	var buf bytes.Buffer
-
-	// CAR v2 pragma
-	buf.Write(carv2Pragma)
-
-	// V2 header (40 bytes)
-	buf.Write(v2Header)
-
-	// V1 header + data blocks
-	buf.Write(v1Header)
-	buf.Write(blockBytes)
-
-	// Index
-	buf.Write(index)
-
-	return buf.Bytes(), nil
+	return v2Buf.Bytes(), nil
 }
 
 // createRawCID creates a CID v1 with raw codec (0x55) and sha2-256 multihash.
@@ -94,114 +68,80 @@ func createRawCID(data []byte) (cid.Cid, error) {
 	return cid.NewCidV1(cid.Raw, hash), nil
 }
 
-// buildV1Header builds the CAR v1 header bytes.
-// Format: varint(version=1) + varint(rootCount) + for each: varint(cidLen) + cidBytes
-func buildV1Header(roots []cid.Cid) []byte {
-	var buf bytes.Buffer
+// buildCBORV1Header builds the standard CAR v1 header in CBOR format.
+// The CBOR encoding is: ld-varint(cbor_len) + CBOR(map{"Roots": [...], "Version": 1})
+func buildCBORV1Header(roots []cid.Cid) []byte {
+	// Build the CBOR data:
+	// a2                          — map(2)
+	//   65 72 6f 6f 74 73         — text(5) "roots"
+	//   8x                         — array(len(roots))
+	//     for each CID:
+	//       d8 2a                  — tag(42)
+	//         58 <len>             — bytes(<len>)
+	//           <cid bytes>
+	//   67 76 65 72 73 69 6f 6e   — text(7) "version"
+	//   01                         — uint(1)
+	var cborBuf bytes.Buffer
 
-	// Version = 1
-	buf.Write(varint.ToUvarint(1))
+	// map(2)
+	cborBuf.WriteByte(0xa2)
 
-	// Root count
-	buf.Write(varint.ToUvarint(uint64(len(roots))))
+	// key "roots"
+	cborBuf.WriteByte(0x65)
+	cborBuf.WriteString("roots")
 
-	for _, root := range roots {
-		rootBytes := root.Bytes()
-		buf.Write(varint.ToUvarint(uint64(len(rootBytes))))
-		buf.Write(rootBytes)
+	// array of roots
+	encodeCBORArray(&cborBuf, len(roots))
+	for _, r := range roots {
+		// CID binary: prefix with multibase identity byte (0x00) for CBOR encoding
+		rawBytes := r.Bytes()
+		cidBytes := make([]byte, 1+len(rawBytes))
+		cidBytes[0] = 0x00 // multibase identity prefix
+		copy(cidBytes[1:], rawBytes)
+		// tag(42)
+		cborBuf.WriteByte(0xd8)
+		cborBuf.WriteByte(0x2a)
+		// bytes(cidLen)
+		encodeCBORBytes(&cborBuf, cidBytes)
 	}
 
+	// key "version"
+	cborBuf.WriteByte(0x67)
+	cborBuf.WriteString("version")
+
+	// value 1
+	cborBuf.WriteByte(0x01)
+
+	cborData := cborBuf.Bytes()
+
+	// Wrap with ld-format: varint(cbor_len) + cbor_data
+	var buf bytes.Buffer
+	buf.Write(varint.ToUvarint(uint64(len(cborData))))
+	buf.Write(cborData)
+
 	return buf.Bytes()
 }
 
-// buildV2Header builds the standard CAR v2 header (48 bytes):
-//
-//	Characteristics [16]byte  — all zeros
-//	DataOffset      uint64 LE — offset of inner CARv1 payload
-//	DataSize        uint64 LE — total size of inner CARv1 payload
-//	IndexOffset     uint64 LE — offset of CARv2 index
-//	IndexSize       uint64 LE — size of CARv2 index
-func buildV2Header(dataOffset, dataSize, indexOffset uint64) []byte {
-	hdr := make([]byte, 48)
-	binary.LittleEndian.PutUint64(hdr[16:24], dataOffset)
-	binary.LittleEndian.PutUint64(hdr[24:32], dataSize)
-	binary.LittleEndian.PutUint64(hdr[32:40], indexOffset)
-	binary.LittleEndian.PutUint64(hdr[40:48], uint64(0)) // index_size updated below
-	return hdr
-}
-
-// buildV2HeaderWithIndexSize builds a CAR v2 header with a known index size.
-func buildV2HeaderWithIndexSize(dataOffset, dataSize, indexOffset, indexSize uint64) []byte {
-	hdr := buildV2Header(dataOffset, dataSize, indexOffset)
-	binary.LittleEndian.PutUint64(hdr[40:48], indexSize)
-	return hdr
-}
-
-// encodeBlock encodes a single block: varint(cidLen+dataLen) + CID bytes + data
-func encodeBlock(c cid.Cid, data []byte) []byte {
-	var buf bytes.Buffer
-	sectionLen := uint64(c.ByteLen() + len(data))
-	buf.Write(varint.ToUvarint(sectionLen))
-	buf.Write(c.Bytes())
-	buf.Write(data)
-	return buf.Bytes()
-}
-
-// indexEntry is a single CID → offset mapping for the CAR v2 index.
-type indexEntry struct {
-	cid    cid.Cid
-	offset uint64
-}
-
-// buildIndex builds the CBOR-encoded CAR v2 index.
-// Format: CBOR array of [CID, offset] pairs.
-// Each entry is encoded as a CBOR array of length 2:
-//
-//	[tag(42) bytes(CID), uint(offset)]
-func buildIndex(entries []indexEntry) []byte {
-	// We build the index in the "indexSorted" format used by go-car/v2:
-	// It's a CBOR array where each element is [CID bytes, offset].
-	var buf bytes.Buffer
-
-	for _, entry := range entries {
-		cidBytes := entry.cid.Bytes()
-
-		// Build a single index entry: [tag(42) bytes(CID), uint(offset)]
-		// CBOR array(2)
-		entryBuf := encodeCBORArray2(cidBytes, entry.offset)
-
-		// Prepend varint length of this entry
-		buf.Write(varint.ToUvarint(uint64(len(entryBuf))))
-		buf.Write(entryBuf)
+// encodeCBORArray writes a CBOR array header for the given length.
+func encodeCBORArray(buf *bytes.Buffer, length int) {
+	n := uint64(length)
+	switch {
+	case n <= 23:
+		buf.WriteByte(0x80 | byte(n))
+	case n <= 0xff:
+		buf.WriteByte(0x98)
+		buf.WriteByte(byte(n))
+	case n <= 0xffff:
+		buf.WriteByte(0x99)
+		buf.WriteByte(byte(n >> 8))
+		buf.WriteByte(byte(n))
+	default:
+		buf.WriteByte(0x9a)
+		buf.WriteByte(byte(n >> 24))
+		buf.WriteByte(byte(n >> 16))
+		buf.WriteByte(byte(n >> 8))
+		buf.WriteByte(byte(n))
 	}
-
-	return buf.Bytes()
-}
-
-// encodeCBORArray2 encodes [tag(42) bytes(CID), uint(offset)] as CBOR.
-//
-//	0x82                — array(2)
-//	  0xd8 0x2a         — tag(42) (CID tag)
-//	    0x58 <len>      — bytes(<len>)
-//	      <cid bytes>
-//	  <offset encoded as uint>
-func encodeCBORArray2(cidBytes []byte, offset uint64) []byte {
-	var buf bytes.Buffer
-
-	// array(2)
-	buf.WriteByte(0x82)
-
-	// tag(42) bytes(CID)
-	buf.WriteByte(0xd8) // tag (major 6)
-	buf.WriteByte(0x2a) // tag number 42 (CID)
-
-	// bytes(cidLen)
-	encodeCBORBytes(&buf, cidBytes)
-
-	// uint(offset)
-	encodeCBORUint(&buf, offset)
-
-	return buf.Bytes()
 }
 
 // encodeCBORBytes writes a CBOR byte string (major type 2).
@@ -227,33 +167,15 @@ func encodeCBORBytes(buf *bytes.Buffer, data []byte) {
 	buf.Write(data)
 }
 
-// encodeCBORUint writes a CBOR unsigned integer (major type 0).
-func encodeCBORUint(buf *bytes.Buffer, v uint64) {
-	switch {
-	case v <= 23:
-		buf.WriteByte(byte(v))
-	case v <= 0xff:
-		buf.WriteByte(0x18)
-		buf.WriteByte(byte(v))
-	case v <= 0xffff:
-		buf.WriteByte(0x19)
-		buf.WriteByte(byte(v >> 8))
-		buf.WriteByte(byte(v))
-	case v <= 0xffffffff:
-		buf.WriteByte(0x1a)
-		buf.WriteByte(byte(v >> 24))
-		buf.WriteByte(byte(v >> 16))
-		buf.WriteByte(byte(v >> 8))
-		buf.WriteByte(byte(v))
-	default:
-		buf.WriteByte(0x1b)
-		buf.WriteByte(byte(v >> 56))
-		buf.WriteByte(byte(v >> 48))
-		buf.WriteByte(byte(v >> 40))
-		buf.WriteByte(byte(v >> 32))
-		buf.WriteByte(byte(v >> 24))
-		buf.WriteByte(byte(v >> 16))
-		buf.WriteByte(byte(v >> 8))
-		buf.WriteByte(byte(v))
-	}
+// encodeBlock encodes a single block: varint(cidLen+dataLen) + CID bytes + data
+func encodeBlock(c cid.Cid, data []byte) []byte {
+	var buf bytes.Buffer
+	sectionLen := uint64(c.ByteLen() + len(data))
+	buf.Write(varint.ToUvarint(sectionLen))
+	buf.Write(c.Bytes())
+	buf.Write(data)
+	return buf.Bytes()
 }
+
+// Ensure we use the imported packages.
+var _ = index.WriteTo
