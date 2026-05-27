@@ -30,15 +30,10 @@ func TestCarParser(t *testing.T) {
 		tmpFile.Write([]byte("invalid car data"))
 		tmpFile.Close()
 
-		parser, err := NewCarParserFromFile(tmpFile.Name())
-		if err != nil {
-			t.Fatalf("Failed to create parser: %v", err)
-		}
-		defer parser.Close()
-
-		_, err = parser.ParseInfo()
+		// New parser now validates early; expect creation to fail for invalid data.
+		_, err = NewCarParserFromFile(tmpFile.Name())
 		if err == nil {
-			t.Fatal("Expected error for invalid CAR file")
+			t.Fatal("Expected error creating parser for invalid CAR file")
 		}
 		t.Logf("Got expected error: %v", err)
 	})
